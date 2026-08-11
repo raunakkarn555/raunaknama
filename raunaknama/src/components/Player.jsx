@@ -124,6 +124,9 @@ export default function Player() {
   const [volume, setVolume] = useState(1);
   const [showQueue, setShowQueue] = useState(false); // hidden by default on every device until opted in
 
+  // ---- Per-track playback error (server/stream failed for this track) ----
+  const [playbackError, setPlaybackError] = useState(null);
+
   const audioRef = useRef(null);
 
   // 0. Fetch the list of available playlists once
@@ -169,10 +172,11 @@ export default function Player() {
       });
   }, [activePlaylistId]);
 
-  // Reset the seek display whenever the track changes (UI-only)
+  // Reset the seek display + any stale playback error whenever the track changes
   useEffect(() => {
     setCurrentTime(0);
     setDuration(0);
+    setPlaybackError(null);
   }, [currentIndex, searchTrack]);
 
   // Debounced live search — results appear as you type
@@ -249,10 +253,38 @@ export default function Player() {
   // whenever `src` changes, which can reject the same way (unsupported
   // source, aborted by a fast track-skip, etc.). Surface that as a normal
   // error state instead of letting it become an unhandled rejection.
+  //
+  // A "Format error" here almost always means /api/stream failed on the
+  // server (yt-dlp couldn't get this track) and returned a JSON error body
+  // instead of audio — the <audio> tag just sees "unsupported format" with
+  // no further detail. We show a visible message and, for playlist
+  // playback, auto-advance so one bad track doesn't just sit there silent.
+  const consecutiveFailures = useRef(0);
+
   const handleAudioError = () => {
     const mediaError = audioRef.current?.error;
     console.warn("Audio element error:", mediaError?.message || mediaError);
     setIsPlaying(false);
+
+    consecutiveFailures.current += 1;
+    if (consecutiveFailures.current > 3) {
+      setPlaybackError(
+        "Several tracks in a row failed to stream. The backend (yt-dlp) is likely blocked or down — check the server logs."
+      );
+      return;
+    }
+
+    setPlaybackError("Couldn't play this track — skipping…");
+    if (activeSource === "playlist" && playlist && playlist.tracks.length > 1) {
+      const timer = setTimeout(() => handleNext(), 1200);
+      return () => clearTimeout(timer);
+    }
+  };
+
+  // Reset the failure streak whenever a track actually starts playing.
+  const handleAudioPlaying = () => {
+    consecutiveFailures.current = 0;
+    setPlaybackError(null);
   };
 
   // Shuffle toggle — generates a fresh random order for the current playlist
@@ -416,6 +448,7 @@ export default function Player() {
               src={streamUrl}
               autoPlay
               onPlay={() => setIsPlaying(true)}
+              onPlaying={handleAudioPlaying}
               onPause={() => setIsPlaying(false)}
               onEnded={activeSource === "search" ? () => setIsPlaying(false) : handleNext}
               onTimeUpdate={handleTimeUpdate}
@@ -423,6 +456,12 @@ export default function Player() {
               onError={handleAudioError}
               className="native-audio"
             />
+
+            {playbackError && (
+              <p className="state-sub" role="status" style={{ color: "#f87171", margin: "4px 0 0" }}>
+                {playbackError}
+              </p>
+            )}
 
             <div className="seek-row">
               <span className="time">{formatTime(currentTime)}</span>

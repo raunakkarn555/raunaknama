@@ -62,8 +62,13 @@ const COOKIES_PATH = resolveCookiesPath();
 
 // Extra args appended to every yt-dlp call: spoof a client YouTube trusts
 // more by default, and attach cookies when we have them.
+//
+// player_client widened from "android,web" to also include "ios" and "tv" —
+// YouTube blocks/throttles individual clients independently (and this
+// changes over time), so trying several in one call gives yt-dlp more
+// chances to find a working format before we give up on a track.
 function authArgs() {
-  const args = ["--extractor-args", "youtube:player_client=android,web"];
+  const args = ["--extractor-args", "youtube:player_client=android,ios,tv,web"];
   if (COOKIES_PATH) {
     args.push("--cookies", COOKIES_PATH);
   }
@@ -396,6 +401,20 @@ async function start() {
     YTDLP_PATH = await helpers.downloadYtDlp();
     ytdlpClient.binaryPath = YTDLP_PATH;
     console.log(`yt-dlp binary ready at: ${YTDLP_PATH}`);
+  }
+
+  // Self-update yt-dlp on every boot. This matters a lot more than it
+  // looks: YouTube changes its internal player/extraction logic often
+  // (roughly monthly), and a stale yt-dlp binary is the #1 real-world cause
+  // of "no supported source found" / silent empty-format failures — it
+  // fails quietly instead of with a clear "outdated" error. Since Render
+  // free-tier instances spin up fresh, this keeps the binary current
+  // without any manual redeploy step. Best-effort: never blocks startup.
+  try {
+    const result = await ytdlpClient.updateYtDlpAsync();
+    console.log(`yt-dlp self-update OK (${result.method}), version: ${result.version || "unknown"}`);
+  } catch (err) {
+    console.warn("yt-dlp self-update failed (continuing with existing binary):", err.message);
   }
 
   // ffmpeg is no longer required: /api/stream now pipes YouTube's native
