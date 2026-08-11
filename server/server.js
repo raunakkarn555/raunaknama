@@ -34,8 +34,19 @@ const PLAYLIST_URL = "https://youtube.com/playlist?list=PLP1mkQtMYc3s";
 // ---------------------------------------------------------------------------
 function resolveCookiesPath() {
   if (process.env.YTDLP_COOKIES_PATH && fs.existsSync(process.env.YTDLP_COOKIES_PATH)) {
-    console.log(`Using YouTube cookies from YTDLP_COOKIES_PATH: ${process.env.YTDLP_COOKIES_PATH}`);
-    return process.env.YTDLP_COOKIES_PATH;
+    try {
+      // Render's Secret Files (e.g. /etc/secrets/cookies.txt) are mounted
+      // read-only. yt-dlp opens --cookies as a jar it both reads AND writes
+      // back to after each run, so pointing it at the secret file directly
+      // crashes with "Read-only file system". Copy it to a writable tmp
+      // path first (mirrors what we do for YTDLP_COOKIES_B64 below).
+      const tmpPath = path.join(os.tmpdir(), "yt-cookies.txt");
+      fs.copyFileSync(process.env.YTDLP_COOKIES_PATH, tmpPath);
+      console.log(`Using YouTube cookies from YTDLP_COOKIES_PATH (copied to writable tmp: ${tmpPath})`);
+      return tmpPath;
+    } catch (err) {
+      console.error("Failed to copy YTDLP_COOKIES_PATH to a writable location:", err.message);
+    }
   }
 
   if (process.env.YTDLP_COOKIES_B64) {
