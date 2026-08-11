@@ -1,14 +1,28 @@
-# Music server — YouTube cookies setup (required on Render)
+# Music server — YouTube access setup (required on Render)
 
-If your logs show:
+There are **two separate YouTube blocks** you'll hit on Render, and you need to fix both. Check your
+logs to see which one you're looking at.
+
+## Block type 1 — "Sign in to confirm you're not a bot"
+
+If your logs show that exact phrase, see "Step 1/2 — cookies" below. This is YouTube's login-wall.
+
+## Block type 2 — "Requested format is not available" (with no bot-check message)
+
+If yt-dlp downloads the webpage fine but then every format selector fails identically — e.g.:
 
 ```
-Sign in to confirm you're not a bot. Use --cookies-from-browser or --cookies for the authentication.
+Streaming audio for track ID: xxxx
+Format "bestaudio[ext=m4a]/..." unavailable, trying fallback.
+ERROR: Requested format is not available. Use --list-formats for a list of available formats
 ```
 
-this is **YouTube itself** blocking Render's IP, not a bug in this server. YouTube trusts almost no
-cloud/datacenter IP (Render, AWS, GCP, etc.) without proof of a real, signed-in browser session. Every
-Render deployment of a yt-dlp server needs this fixed once — it's a 5 minute setup and then it just works.
+this is **not** the bot-check — it's YouTube's newer **SABR** enforcement, which quietly hands back
+zero downloadable adaptive audio/video formats to requests from datacenter IP ranges (Render, AWS,
+GCP, etc.), independent of cookies or which player client you use. Cookies alone will **not** fix
+this. See "Step 3 — proxy" below, which is the fix that currently works.
+
+If your logs show cookies configured and you're still hitting this, skip straight to Step 3.
 
 ## Step 1 — Export your YouTube cookies
 
@@ -44,6 +58,36 @@ Pick **one** of these (both are already supported by `server.js`):
 
 The server reads whichever one you set on startup (Secret File takes priority) and passes it to every
 yt-dlp call automatically. Redeploy after adding either variable.
+
+## Step 3 — Residential proxy (the real fix for "Requested format is not available")
+
+1. Sign up for any cheap residential/mobile proxy provider (e.g. Webshare, IPRoyal, Smartproxy). You
+   don't need much bandwidth — audio streaming from a music app is light traffic. A few GB/month is
+   plenty for personal use.
+2. Get your proxy's connection URL, in the form:
+   ```
+   http://username:password@proxy-host:port
+   ```
+3. In Render → **Environment**, add:
+   ```
+   YTDLP_PROXY=http://username:password@proxy-host:port
+   ```
+4. Redeploy. `server.js` now passes `--proxy` to every yt-dlp call automatically (see `authArgs()`).
+
+Why this is required: Render's outbound IPs are well-known datacenter ranges. YouTube's SABR system
+increasingly refuses to hand out playable adaptive formats to those ranges regardless of cookies or
+which client (`android`/`ios`/`web`) yt-dlp pretends to be. Routing the request through a residential
+IP is currently the only lever that reliably restores normal format availability. Keep cookies
+configured too (Step 1/2) — you want both: cookies solve the login-wall, the proxy solves the
+IP-reputation/SABR wall.
+
+## Step 4 (optional, best-effort) — PO Token provider
+
+You can additionally run a [bgutil-ytdlp-pot-provider](https://github.com/Brainicism/bgutil-ytdlp-pot-provider)
+sidecar and point `server.js` at it with `YTDLP_POT_PROVIDER_URL=http://localhost:4416`. This can help
+on the margins, but as of 2026 the project's own maintainers note that PO tokens alone no longer
+bypass YouTube's bot-check for most flagged datacenter IPs — treat Step 3 (the proxy) as the fix, and
+this as a minor supplement, not a substitute.
 
 ## Notes
 
