@@ -1,0 +1,14 @@
+{
+  "rules": {
+    "presence": {
+      ".read": true,
+      "$connectionId": {
+        ".write": true
+      }
+    },
+    "$other": {
+      ".read": false,
+      ".write": false
+    }
+  }
+}

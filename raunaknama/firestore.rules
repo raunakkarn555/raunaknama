@@ -1,0 +1,14 @@
+rules_version = '2';
+
+// Anyone can READ the playlist (needed for the site to work for visitors).
+// Nobody can WRITE from the browser — you edit the playlist only via
+// `npm run seed` (scripts/seed.js) or directly in the Firebase console,
+// both of which use admin credentials that bypass these rules anyway.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /tracks/{trackId} {
+      allow read: if true;
+      allow write: if false;
+    }
+  }
+}

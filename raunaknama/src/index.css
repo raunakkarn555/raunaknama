@@ -1,0 +1,66 @@
+/*
+  RAUNAKNAMA — design tokens
+  Subject: a 90s Bollywood radio that plays in Indian barber shops.
+  Palette pulls from the barber pole itself (red / gold / cream) against
+  a near-black backdrop, like a shop window lit up after dark.
+*/
+:root {
+  --bg: #150a0d;
+  --surface: #221114;
+  --surface-raised: #2c1519;
+  --stripe-red: #b8333a;
+  --stripe-gold: #e2ab3f;
+  --cream: #f4e8d8;
+  --muted: #a9877a;
+  --line: #3a1e22;
+
+  --font-display: "Baloo 2", system-ui, sans-serif;
+  --font-body: "Manrope", system-ui, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  background-image: radial-gradient(circle at 20% 0%, #2a1216 0%, var(--bg) 55%);
+  color: var(--cream);
+  font-family: var(--font-body);
+  -webkit-font-smoothing: antialiased;
+}
+
+button {
+  font-family: inherit;
+  cursor: pointer;
+  color: inherit;
+}
+
+button,
+input {
+  font-family: inherit;
+}
+
+a {
+  color: var(--stripe-gold);
+}
+
+:focus-visible {
+  outline: 2px solid var(--stripe-gold);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
