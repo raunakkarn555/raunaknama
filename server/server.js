@@ -2,12 +2,14 @@ const express = require("express");
 const cors = require("cors");
 const { spawn } = require("child_process");
 const { YtDlp, helpers } = require("ytdlp-nodejs");
+const fs = require("fs");
 
 const app = express();
 app.use(cors());
 
 const ytdlpClient = new YtDlp();
 let YTDLP_PATH = ytdlpClient.binaryPath;
+let FFMPEG_PATH = ytdlpClient.ffmpegPath || helpers.findFFmpegBinary();
 const PLAYLIST_URL = "https://youtube.com/playlist?list=PLP1mkQtMYc3s";
 
 const PLAYLISTS = [
@@ -135,6 +137,13 @@ app.get("/api/search", (req, res) => {
 });
 
 // 2. Direct MP3 Audio Stream
+// -------------------------------------------------------------------------
+// yt-dlp's raw "bestaudio" pick is almost always webm/opus or m4a, NOT mp3
+// — but we declare Content-Type: audio/mpeg. That mismatch is exactly what
+// makes browsers throw "NotSupportedError: no supported source" even
+// though bytes ARE arriving. Fix: transcode to real mp3 via ffmpeg
+// (-x --audio-format mp3) so the header always matches the actual bytes.
+// -------------------------------------------------------------------------
 app.get("/api/stream", (req, res) => {
   const { id } = req.query;
 
@@ -145,14 +154,23 @@ app.get("/api/stream", (req, res) => {
   const videoUrl = `https://www.youtube.com/watch?v=${id}`;
   console.log(`Streaming audio for track ID: ${id}`);
 
-  const ytdlp = spawn(YTDLP_PATH, ["-o", "-", "-f", "bestaudio/best", "--no-warnings", videoUrl]);
+  const args = [
+    "-o", "-",
+    "-f", "bestaudio/best",
+    "-x",
+    "--audio-format", "mp3",
+    "--no-warnings",
+  ];
+  if (FFMPEG_PATH) {
+    args.push("--ffmpeg-location", FFMPEG_PATH);
+  }
+  args.push(videoUrl);
+
+  const ytdlp = spawn(YTDLP_PATH, args);
 
   let stderrData = "";
   let headerSent = false;
 
-  // Only send the audio headers once yt-dlp actually starts producing bytes.
-  // If it fails before that, we can still send a proper JSON error instead
-  // of leaving the client hanging on a 200 response that never arrives.
   ytdlp.stdout.once("data", () => {
     if (!res.headersSent) {
       res.setHeader("Content-Type", "audio/mpeg");
@@ -196,11 +214,18 @@ const PORT = process.env.PORT || 5000;
 const HOST = process.env.HOST || "0.0.0.0";
 
 async function start() {
-  if (!YTDLP_PATH || !require("fs").existsSync(YTDLP_PATH)) {
+  if (!YTDLP_PATH || !fs.existsSync(YTDLP_PATH)) {
     console.log("yt-dlp binary not found — downloading it now (one-time setup)...");
     YTDLP_PATH = await helpers.downloadYtDlp();
     ytdlpClient.binaryPath = YTDLP_PATH;
     console.log(`yt-dlp binary ready at: ${YTDLP_PATH}`);
+  }
+
+  if (!FFMPEG_PATH || !fs.existsSync(FFMPEG_PATH)) {
+    console.log("ffmpeg binary not found — downloading it now (one-time setup)...");
+    FFMPEG_PATH = await helpers.downloadFFmpeg();
+    ytdlpClient.ffmpegPath = FFMPEG_PATH;
+    console.log(`ffmpeg binary ready at: ${FFMPEG_PATH}`);
   }
 
   app.listen(PORT, HOST, () => {
