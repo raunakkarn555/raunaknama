@@ -79,7 +79,14 @@ const COOKIES_PATH = resolveCookiesPath();
 // changes over time), so trying several in one call gives yt-dlp more
 // chances to find a working format before we give up on a track.
 function authArgs() {
-  const args = ["--extractor-args", "youtube:player_client=android,ios,tv,web"];
+  // "tv" and "web" are currently being hit hard by YouTube's tightened
+  // JS-challenge/bot-check system (surfaces as yt-dlp's generic
+  // "The page needs to be reloaded" error — an active, widely-reported
+  // issue upstream as of early-mid 2026, not something wrong with this
+  // server). android/ios/android_vr are, for now, meaningfully more
+  // resistant to it, so we lead with those and drop tv/web entirely
+  // rather than let a broken client abort the whole request.
+  const args = ["--extractor-args", "youtube:player_client=android,ios,android_vr"];
   if (COOKIES_PATH) {
     args.push("--cookies", COOKIES_PATH);
   }
