@@ -136,14 +136,28 @@ app.get("/api/search", (req, res) => {
   });
 });
 
-// 2. Direct MP3 Audio Stream
+// 2. Direct native audio stream — NO ffmpeg transcoding
 // -------------------------------------------------------------------------
-// yt-dlp's raw "bestaudio" pick is almost always webm/opus or m4a, NOT mp3
-// — but we declare Content-Type: audio/mpeg. That mismatch is exactly what
-// makes browsers throw "NotSupportedError: no supported source" even
-// though bytes ARE arriving. Fix: transcode to real mp3 via ffmpeg
-// (-x --audio-format mp3) so the header always matches the actual bytes.
+// The old code forced yt-dlp to re-encode every track to mp3 (-x
+// --audio-format mp3). On a low-CPU host (e.g. Render's free tier) that
+// transcode is slow and can fail/time out mid-stream, so the browser gets
+// truncated or empty bytes under an audio/mpeg header -> NotSupportedError.
+//
+// Fix: request YouTube's native audio-only format directly (m4a/AAC — every
+// modern browser plays this natively) and pipe the raw bytes straight
+// through with NO -x / --audio-format flag, so ffmpeg is never invoked.
+// This starts almost instantly, even on very limited CPU.
+//
+// We try m4a first, and if a given video genuinely has no m4a track we
+// fall back to yt-dlp's best audio-only pick (normally webm/opus) with a
+// matching Content-Type, so playback still works instead of breaking.
 // -------------------------------------------------------------------------
+const STREAM_FORMATS = [
+  { selector: "bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]", contentType: "audio/mp4" },
+  { selector: "bestaudio[ext=webm]/bestaudio[acodec^=opus]", contentType: "audio/webm" },
+  { selector: "bestaudio/best", contentType: "audio/webm" },
+];
+
 app.get("/api/stream", (req, res) => {
   const { id } = req.query;
 
@@ -154,60 +168,97 @@ app.get("/api/stream", (req, res) => {
   const videoUrl = `https://www.youtube.com/watch?v=${id}`;
   console.log(`Streaming audio for track ID: ${id}`);
 
-  const args = [
-    "-o", "-",
-    "-f", "bestaudio/best",
-    "-x",
-    "--audio-format", "mp3",
-    "--no-warnings",
-  ];
-  if (FFMPEG_PATH) {
-    args.push("--ffmpeg-location", FFMPEG_PATH);
-  }
-  args.push(videoUrl);
+  // We never proxy byte-range requests to yt-dlp (it re-fetches from
+  // scratch each time), so tell the browser up front not to expect them —
+  // this avoids <audio> stalling while waiting on a 206 that never comes.
+  res.setHeader("Accept-Ranges", "none");
+  res.setHeader("Cache-Control", "no-store");
 
-  const ytdlp = spawn(YTDLP_PATH, args);
+  let currentChild = null;
+  let clientClosed = false;
 
-  let stderrData = "";
-  let headerSent = false;
-
-  ytdlp.stdout.once("data", () => {
-    if (!res.headersSent) {
-      res.setHeader("Content-Type", "audio/mpeg");
-      headerSent = true;
-    }
-  });
-
-  ytdlp.stdout.pipe(res);
-
-  ytdlp.stderr.on("data", (chunk) => {
-    stderrData += chunk.toString();
-  });
-
-  ytdlp.on("error", (err) => {
-    console.error("yt-dlp spawn error:", err);
-    if (!res.headersSent) {
-      res.status(500).json({ error: "Failed to start yt-dlp", details: err.message });
-    } else {
-      res.end();
-    }
-  });
-
-  ytdlp.on("close", (code) => {
-    if (code !== 0 && !headerSent && !res.headersSent) {
-      console.error("yt-dlp stream error:", stderrData);
-      res.status(500).json({ error: "Failed to stream audio", details: stderrData });
-    } else if (!res.writableEnded) {
-      res.end();
-    }
-  });
-
-  // Clean up spawn process if user closes tab or changes song
   req.on("close", () => {
-    if (ytdlp && !ytdlp.killed) {
-      ytdlp.kill();
+    clientClosed = true;
+    if (currentChild && !currentChild.killed) {
+      currentChild.kill("SIGKILL");
     }
   });
+
+  const tryFormat = (formatIndex) => {
+    if (clientClosed) return;
+
+    const format = STREAM_FORMATS[formatIndex];
+    if (!format) {
+      // Exhausted every option — nothing we can do for this video.
+      if (!res.headersSent) {
+        res.status(500).json({ error: "No playable audio stream found for this track" });
+      } else {
+        res.end();
+      }
+      return;
+    }
+
+    const args = [
+      "-o", "-",
+      "-f", format.selector,
+      "--no-warnings",
+      "--no-part",
+      "--no-playlist",
+      videoUrl,
+    ];
+
+    const ytdlp = spawn(YTDLP_PATH, args);
+    currentChild = ytdlp;
+
+    let stderrData = "";
+    let gotBytes = false;
+
+    ytdlp.stdout.once("data", (firstChunk) => {
+      gotBytes = true;
+      if (!res.headersSent) {
+        res.status(200);
+        res.setHeader("Content-Type", format.contentType);
+      }
+      res.write(firstChunk);
+      ytdlp.stdout.pipe(res);
+    });
+
+    ytdlp.stderr.on("data", (chunk) => {
+      stderrData += chunk.toString();
+    });
+
+    ytdlp.on("error", (err) => {
+      console.error("yt-dlp spawn error:", err);
+      if (!res.headersSent) {
+        res.status(500).json({ error: "Failed to start yt-dlp", details: err.message });
+      } else if (!res.writableEnded) {
+        res.end();
+      }
+    });
+
+    ytdlp.on("close", (code) => {
+      if (clientClosed) return;
+
+      if (!gotBytes) {
+        // This format wasn't available for this particular video — fall
+        // back to the next one instead of failing the whole request.
+        console.warn(
+          `Format "${format.selector}" unavailable for ${id}, trying fallback. yt-dlp said: ${stderrData.slice(-300)}`
+        );
+        tryFormat(formatIndex + 1);
+        return;
+      }
+
+      if (code !== 0) {
+        console.error("yt-dlp stream error mid-transfer:", stderrData.slice(-500));
+      }
+      if (!res.writableEnded) {
+        res.end();
+      }
+    });
+  };
+
+  tryFormat(0);
 });
 
 const PORT = process.env.PORT || 5000;
@@ -221,12 +272,9 @@ async function start() {
     console.log(`yt-dlp binary ready at: ${YTDLP_PATH}`);
   }
 
-  if (!FFMPEG_PATH || !fs.existsSync(FFMPEG_PATH)) {
-    console.log("ffmpeg binary not found — downloading it now (one-time setup)...");
-    FFMPEG_PATH = await helpers.downloadFFmpeg();
-    ytdlpClient.ffmpegPath = FFMPEG_PATH;
-    console.log(`ffmpeg binary ready at: ${FFMPEG_PATH}`);
-  }
+  // ffmpeg is no longer required: /api/stream now pipes YouTube's native
+  // m4a/webm audio straight through with no transcoding step, so we don't
+  // spend startup time downloading/verifying an ffmpeg binary anymore.
 
   app.listen(PORT, HOST, () => {
     console.log(`🎵 Audio streaming server running on http://${HOST}:${PORT}`);

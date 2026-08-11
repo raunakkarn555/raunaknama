@@ -233,8 +233,26 @@ export default function Player() {
     if (isPlaying) {
       audioRef.current.pause();
     } else {
-      audioRef.current.play();
+      // play() returns a promise; if it rejects (e.g. the source hasn't
+      // loaded yet, or a track-skip interrupted it) we swallow it here so
+      // it doesn't surface as an "Uncaught (in promise)" console error.
+      const playPromise = audioRef.current.play();
+      if (playPromise && typeof playPromise.catch === "function") {
+        playPromise.catch((err) => {
+          console.warn("Playback couldn't start:", err.message || err);
+        });
+      }
     }
+  };
+
+  // The native <audio autoPlay> also fires its own internal play() call
+  // whenever `src` changes, which can reject the same way (unsupported
+  // source, aborted by a fast track-skip, etc.). Surface that as a normal
+  // error state instead of letting it become an unhandled rejection.
+  const handleAudioError = () => {
+    const mediaError = audioRef.current?.error;
+    console.warn("Audio element error:", mediaError?.message || mediaError);
+    setIsPlaying(false);
   };
 
   // Shuffle toggle — generates a fresh random order for the current playlist
@@ -402,6 +420,7 @@ export default function Player() {
               onEnded={activeSource === "search" ? () => setIsPlaying(false) : handleNext}
               onTimeUpdate={handleTimeUpdate}
               onLoadedMetadata={handleLoadedMetadata}
+              onError={handleAudioError}
               className="native-audio"
             />
 
