@@ -6,24 +6,10 @@ const { YtDlp, helpers } = require("ytdlp-nodejs");
 const app = express();
 app.use(cors());
 
-// ---------------------------------------------------------------------------
-// yt-dlp binary — previously a hardcoded local .exe path (Windows-only).
-// ytdlp-nodejs normally downloads a yt-dlp binary for the current platform
-// via its postinstall script. Some npm setups block package install scripts
-// (e.g. npm's allowScripts), so as a fallback we download the binary
-// ourselves here with the package's own helper if none was found. Either
-// way, YTDLP_PATH ends up pointing at a real executable, and every
-// spawn() call below is unchanged.
-// ---------------------------------------------------------------------------
 const ytdlpClient = new YtDlp();
 let YTDLP_PATH = ytdlpClient.binaryPath;
 const PLAYLIST_URL = "https://youtube.com/playlist?list=PLP1mkQtMYc3s";
 
-// ---------------------------------------------------------------------------
-// Playlist registry — the original single playlist stays first/default so
-// any existing call to /api/playlist (no query params) behaves exactly as
-// before. Two more playlists were added on request.
-// ---------------------------------------------------------------------------
 const PLAYLISTS = [
   { id: "default", label: "Saloon Classics", url: PLAYLIST_URL },
   {
@@ -38,17 +24,12 @@ const PLAYLISTS = [
   },
 ];
 
-// 0. List available playlists (id + label only — cheap, no yt-dlp call)
 app.get("/api/playlists", (req, res) => {
   res.json({
     playlists: PLAYLISTS.map(({ id, label }) => ({ id, label })),
   });
 });
 
-// 1. Fetch Playlist Metadata
-// Accepts an optional ?playlistId= query param to pick which registered
-// playlist to load. When omitted, falls back to the original default
-// playlist — so existing calls keep working unchanged.
 app.get("/api/playlist", (req, res) => {
   const { playlistId } = req.query;
   const selected =
@@ -56,29 +37,28 @@ app.get("/api/playlist", (req, res) => {
 
   console.log(`Fetching playlist details from YouTube... (${selected.label})`);
 
-  const ytdlp = spawn(YTDLP_PATH, [
-    "-J",
-    "--flat-playlist",
-    selected.url
-  ]);
+  const ytdlp = spawn(YTDLP_PATH, ["-J", "--flat-playlist", selected.url]);
 
   let stdoutData = "";
   let stderrData = "";
 
-  ytdlp.stdout.on("data", (chunk) => {
-    stdoutData += chunk;
-  });
+  ytdlp.stdout.on("data", (chunk) => { stdoutData += chunk; });
+  ytdlp.stderr.on("data", (chunk) => { stderrData += chunk.toString(); });
 
-  ytdlp.stderr.on("data", (chunk) => {
-    stderrData += chunk.toString();
+  ytdlp.on("error", (err) => {
+    console.error("yt-dlp spawn error:", err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: "Failed to start yt-dlp", details: err.message });
+    }
   });
 
   ytdlp.on("close", (code) => {
+    if (res.headersSent) return;
     if (code !== 0) {
       console.error("yt-dlp process error:", stderrData);
-      return res.status(500).json({ 
-        error: "Failed to fetch playlist metadata", 
-        details: stderrData 
+      return res.status(500).json({
+        error: "Failed to fetch playlist metadata",
+        details: stderrData,
       });
     }
 
@@ -103,7 +83,6 @@ app.get("/api/playlist", (req, res) => {
   });
 });
 
-// 1b. Search YouTube for any song (independent of the registered playlists)
 app.get("/api/search", (req, res) => {
   const { q } = req.query;
 
@@ -113,25 +92,23 @@ app.get("/api/search", (req, res) => {
 
   console.log(`Searching YouTube for: ${q}`);
 
-  const ytdlp = spawn(YTDLP_PATH, [
-    "-J",
-    "--flat-playlist",
-    "--no-warnings",
-    `ytsearch12:${q}`
-  ]);
+  const ytdlp = spawn(YTDLP_PATH, ["-J", "--flat-playlist", "--no-warnings", `ytsearch12:${q}`]);
 
   let stdoutData = "";
   let stderrData = "";
 
-  ytdlp.stdout.on("data", (chunk) => {
-    stdoutData += chunk;
-  });
+  ytdlp.stdout.on("data", (chunk) => { stdoutData += chunk; });
+  ytdlp.stderr.on("data", (chunk) => { stderrData += chunk.toString(); });
 
-  ytdlp.stderr.on("data", (chunk) => {
-    stderrData += chunk.toString();
+  ytdlp.on("error", (err) => {
+    console.error("yt-dlp spawn error:", err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: "Failed to start yt-dlp", details: err.message });
+    }
   });
 
   ytdlp.on("close", (code) => {
+    if (res.headersSent) return;
     if (code !== 0) {
       console.error("yt-dlp search error:", stderrData);
       return res.status(500).json({
@@ -168,16 +145,44 @@ app.get("/api/stream", (req, res) => {
   const videoUrl = `https://www.youtube.com/watch?v=${id}`;
   console.log(`Streaming audio for track ID: ${id}`);
 
-  res.setHeader("Content-Type", "audio/mpeg");
+  const ytdlp = spawn(YTDLP_PATH, ["-o", "-", "-f", "bestaudio/best", "--no-warnings", videoUrl]);
 
-  const ytdlp = spawn(YTDLP_PATH, [
-    "-o", "-",
-    "-f", "bestaudio/best",
-    "--no-warnings",
-    videoUrl
-  ]);
+  let stderrData = "";
+  let headerSent = false;
+
+  // Only send the audio headers once yt-dlp actually starts producing bytes.
+  // If it fails before that, we can still send a proper JSON error instead
+  // of leaving the client hanging on a 200 response that never arrives.
+  ytdlp.stdout.once("data", () => {
+    if (!res.headersSent) {
+      res.setHeader("Content-Type", "audio/mpeg");
+      headerSent = true;
+    }
+  });
 
   ytdlp.stdout.pipe(res);
+
+  ytdlp.stderr.on("data", (chunk) => {
+    stderrData += chunk.toString();
+  });
+
+  ytdlp.on("error", (err) => {
+    console.error("yt-dlp spawn error:", err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: "Failed to start yt-dlp", details: err.message });
+    } else {
+      res.end();
+    }
+  });
+
+  ytdlp.on("close", (code) => {
+    if (code !== 0 && !headerSent && !res.headersSent) {
+      console.error("yt-dlp stream error:", stderrData);
+      res.status(500).json({ error: "Failed to stream audio", details: stderrData });
+    } else if (!res.writableEnded) {
+      res.end();
+    }
+  });
 
   // Clean up spawn process if user closes tab or changes song
   req.on("close", () => {
@@ -187,19 +192,10 @@ app.get("/api/stream", (req, res) => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Listen — hosting platforms like Render/Railway/Fly assign the port via the
-// PORT env var and require binding to 0.0.0.0 (not 127.0.0.1, which only
-// accepts local connections and would make the service unreachable from
-// outside the container). Locally, this still defaults to port 5000 exactly
-// like before.
-// ---------------------------------------------------------------------------
 const PORT = process.env.PORT || 5000;
 const HOST = process.env.HOST || "0.0.0.0";
 
 async function start() {
-  // If ytdlp-nodejs's postinstall script didn't run (e.g. npm blocked it
-  // via allowScripts) there will be no binary yet — download one now.
   if (!YTDLP_PATH || !require("fs").existsSync(YTDLP_PATH)) {
     console.log("yt-dlp binary not found — downloading it now (one-time setup)...");
     YTDLP_PATH = await helpers.downloadYtDlp();
