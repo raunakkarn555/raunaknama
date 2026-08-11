@@ -15,6 +15,11 @@ interface: hidden video, live "listeners" count, barber-pole progress bar.
 >
 > That means there's only one folder, one `npm install`, one build, and one
 > deploy. No backend to host separately.
+>
+> The `/api/playlists`, `/api/playlist`, `/api/search`, and `/api/stream`
+> endpoints (yt-dlp powered) are served by **Netlify Functions** in
+> `netlify/functions/`, exposed at `/api/*` via the redirect in
+> `netlify.toml` — no standalone server process to deploy or run.
 
 > **Note on ads:** this uses YouTube's real embedded player, just visually
 > hidden. That's the only way to do this within YouTube's terms of service.

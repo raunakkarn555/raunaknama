@@ -1,10 +1,7 @@
 import React, { useEffect, useState, useRef } from "react";
 import "./Player.css";
 
-// In production, set VITE_API_BASE_URL to your deployed backend's URL
-// (e.g. https://raunaknama-server.onrender.com). Locally it falls back to
-// the same localhost:5000 as before, so nothing changes for local dev.
-const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:5000";
+const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
 
 const formatTime = (secs) => {
   if (!secs || Number.isNaN(secs) || !Number.isFinite(secs)) return "0:00";
@@ -15,7 +12,6 @@ const formatTime = (secs) => {
   return `${m}:${s}`;
 };
 
-// Fisher–Yates shuffle of track indices
 const shuffledIndices = (length) => {
   const arr = Array.from({ length }, (_, i) => i);
   for (let i = arr.length - 1; i > 0; i--) {
@@ -95,41 +91,36 @@ const CloseIcon = () => (
 );
 
 export default function Player() {
-  // ---- Core playback state (kept the same shape/behaviour as before) ----
   const [playlist, setPlaylist] = useState(null);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
-  // ---- Multi-playlist selection ----
   const [playlists, setPlaylists] = useState([]);
   const [activePlaylistId, setActivePlaylistId] = useState(null);
 
-  // ---- Shuffle ----
   const [shuffle, setShuffle] = useState(false);
   const [shuffleOrder, setShuffleOrder] = useState([]);
 
-  // ---- Search-any-song ----
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState([]);
   const [isSearching, setIsSearching] = useState(false);
   const [searchFocused, setSearchFocused] = useState(false);
   const [searchTrack, setSearchTrack] = useState(null);
-  const [activeSource, setActiveSource] = useState("playlist"); // "playlist" | "search"
+  const [activeSource, setActiveSource] = useState("playlist");
 
-  // ---- Seek / volume / queue visibility (UI-only) ----
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [volume, setVolume] = useState(1);
-  const [showQueue, setShowQueue] = useState(false); // hidden by default on every device until opted in
+  const [showQueue, setShowQueue] = useState(false);
 
-  // ---- Per-track playback error (server/stream failed for this track) ----
   const [playbackError, setPlaybackError] = useState(null);
 
   const audioRef = useRef(null);
+  const consecutiveFailures = useRef(0);
 
-  // 0. Fetch the list of available playlists once
+  // 0. Fetch available playlists once
   useEffect(() => {
     fetch(`${API_BASE}/api/playlists`)
       .then((res) => res.json())
@@ -142,7 +133,7 @@ export default function Player() {
       .catch((err) => console.error("Playlists list fetch error:", err));
   }, []);
 
-  // 1. Fetch Playlist Metadata from Express Backend (now scoped to the active playlist)
+  // 1. Fetch Playlist Metadata
   useEffect(() => {
     if (!activePlaylistId) return;
     setLoading(true);
@@ -167,19 +158,12 @@ export default function Player() {
       })
       .catch((err) => {
         console.error("Playlist Fetch Error:", err);
-        setError("Could not connect to streaming server on port 5000.");
+        setError("Could not connect to streaming server.");
         setLoading(false);
       });
   }, [activePlaylistId]);
 
-  // Reset the seek display + any stale playback error whenever the track changes
-  useEffect(() => {
-    setCurrentTime(0);
-    setDuration(0);
-    setPlaybackError(null);
-  }, [currentIndex, searchTrack]);
-
-  // Debounced live search — results appear as you type
+  // 2. Search Debounce
   useEffect(() => {
     if (!searchQuery.trim()) {
       setSearchResults([]);
@@ -207,7 +191,36 @@ export default function Player() {
     ? `${API_BASE}/api/stream?id=${currentTrack.id}`
     : "";
 
-  // 2. Playback Controls
+  // 3. Managed Safe Audio Loading without Race Conditions
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio) return;
+
+    if (!streamUrl) {
+      audio.pause();
+      return;
+    }
+
+    setCurrentTime(0);
+    setDuration(0);
+    setPlaybackError(null);
+
+    audio.load();
+
+    if (isPlaying) {
+      const playPromise = audio.play();
+      if (playPromise !== undefined) {
+        playPromise.catch((err) => {
+          if (err.name !== "AbortError") {
+            console.warn("Playback prevented:", err.message || err);
+            setIsPlaying(false);
+          }
+        });
+      }
+    }
+  }, [streamUrl]);
+
+  // 4. Playback Controls
   const handleNext = () => {
     if (!playlist) return;
     setActiveSource("playlist");
@@ -233,33 +246,25 @@ export default function Player() {
   };
 
   const togglePlayPause = () => {
-    if (!audioRef.current) return;
+    const audio = audioRef.current;
+    if (!audio) return;
+
     if (isPlaying) {
-      audioRef.current.pause();
+      audio.pause();
     } else {
-      // play() returns a promise; if it rejects (e.g. the source hasn't
-      // loaded yet, or a track-skip interrupted it) we swallow it here so
-      // it doesn't surface as an "Uncaught (in promise)" console error.
-      const playPromise = audioRef.current.play();
-      if (playPromise && typeof playPromise.catch === "function") {
-        playPromise.catch((err) => {
-          console.warn("Playback couldn't start:", err.message || err);
-        });
+      const playPromise = audio.play();
+      if (playPromise !== undefined) {
+        playPromise
+          .then(() => setIsPlaying(true))
+          .catch((err) => {
+            if (err.name !== "AbortError") {
+              console.warn("Play error:", err.message || err);
+            }
+            setIsPlaying(false);
+          });
       }
     }
   };
-
-  // The native <audio autoPlay> also fires its own internal play() call
-  // whenever `src` changes, which can reject the same way (unsupported
-  // source, aborted by a fast track-skip, etc.). Surface that as a normal
-  // error state instead of letting it become an unhandled rejection.
-  //
-  // A "Format error" here almost always means /api/stream failed on the
-  // server (yt-dlp couldn't get this track) and returned a JSON error body
-  // instead of audio — the <audio> tag just sees "unsupported format" with
-  // no further detail. We show a visible message and, for playlist
-  // playback, auto-advance so one bad track doesn't just sit there silent.
-  const consecutiveFailures = useRef(0);
 
   const handleAudioError = () => {
     const mediaError = audioRef.current?.error;
@@ -269,7 +274,7 @@ export default function Player() {
     consecutiveFailures.current += 1;
     if (consecutiveFailures.current > 3) {
       setPlaybackError(
-        "Several tracks in a row failed to stream. The backend (yt-dlp) is likely blocked or down — check the server logs."
+        "Several tracks in a row failed to stream. The backend (yt-dlp) is likely blocked or down."
       );
       return;
     }
@@ -281,13 +286,12 @@ export default function Player() {
     }
   };
 
-  // Reset the failure streak whenever a track actually starts playing.
   const handleAudioPlaying = () => {
     consecutiveFailures.current = 0;
     setPlaybackError(null);
+    setIsPlaying(true);
   };
 
-  // Shuffle toggle — generates a fresh random order for the current playlist
   const toggleShuffle = () => {
     setShuffle((prev) => {
       const next = !prev;
@@ -298,19 +302,18 @@ export default function Player() {
     });
   };
 
-  // Select a track directly from the visible queue
   const selectPlaylistTrack = (idx) => {
     setActiveSource("playlist");
     setCurrentIndex(idx);
+    setIsPlaying(true);
   };
 
-  // Play a track found via search, independent of any registered playlist
   const playSearchResult = (track) => {
     setSearchTrack(track);
     setActiveSource("search");
+    setIsPlaying(true);
   };
 
-  // UI-only helpers for the custom seek bar / volume slider
   const handleSeek = (e) => {
     const value = Number(e.target.value);
     if (audioRef.current) audioRef.current.currentTime = value;
@@ -340,7 +343,6 @@ export default function Player() {
 
   return (
     <div className="player-card">
-      {/* ---------- Playlist tabs ---------- */}
       {playlists.length > 0 && (
         <div className="playlist-tabs" role="tablist" aria-label="Choose a playlist">
           {playlists.map((p) => (
@@ -357,7 +359,6 @@ export default function Player() {
         </div>
       )}
 
-      {/* ---------- Search any song ---------- */}
       <div className="search-wrap">
         <div className={`search-box ${searchFocused ? "is-focused" : ""}`}>
           <SearchIcon />
@@ -411,9 +412,6 @@ export default function Player() {
         <div className="state-card state-card--error state-card--inline">
           <p className="state-title state-title--error">Signal lost</p>
           <p className="state-sub">{error}</p>
-          <p className="state-hint">
-            Make sure <code>node server.js</code> is running on port 5000.
-          </p>
         </div>
       )}
 
@@ -442,11 +440,9 @@ export default function Player() {
               </p>
             </div>
 
-            {/* Native audio element drives playback; UI is fully custom */}
             <audio
               ref={audioRef}
               src={streamUrl}
-              autoPlay
               onPlay={() => setIsPlaying(true)}
               onPlaying={handleAudioPlaying}
               onPause={() => setIsPlaying(false)}
@@ -556,3 +552,4 @@ export default function Player() {
     </div>
   );
 }
+
