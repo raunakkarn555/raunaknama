@@ -9,6 +9,25 @@ import {
   CORS_HEADERS,
 } from "./_shared/ytdlpService.mjs";
 
+// Format selector, in priority order:
+//   1. m4a audio that is NOT served over HLS ([protocol!*=m3u8]) — this is
+//      the fast path: a single progressive/DASH URL the <audio> element (or
+//      a direct fetch) can play with zero extra JS.
+//   2. Any other non-HLS bestaudio (webm/opus etc).
+//   3. As of 2026, YouTube increasingly only exposes audio via HLS for a
+//      growing share of videos (anti-bot hardening removed the old
+//      direct-URL formats for those). If that's all that's available, fall
+//      back to bestaudio even if it IS HLS — the frontend knows how to play
+//      that via hls.js, it's just a different code path.
+const FORMAT_SELECTOR =
+  "ba[ext=m4a][protocol!*=m3u8]/ba[protocol!*=m3u8]/ba[ext=m4a]/bestaudio";
+
+function isHlsFormat(info) {
+  const protocol = String(info?.protocol || "");
+  const url = String(info?.url || "");
+  return protocol.includes("m3u8") || url.includes(".m3u8") || info?.ext === "m3u8";
+}
+
 export const handler = async (event) => {
   if (event.httpMethod === "OPTIONS") {
     return { statusCode: 204, headers: CORS_HEADERS, body: "" };
@@ -24,22 +43,22 @@ export const handler = async (event) => {
     };
   }
 
-  // Check cache for existing YouTube CDN audio URL
-  const cachedUrl = getCached(streamUrlCache, id);
-  if (cachedUrl) {
+  // Check cache for an already-resolved stream (URL + format type).
+  const cached = getCached(streamUrlCache, id);
+  if (cached) {
     return {
-      statusCode: 302,
-      headers: { Location: cachedUrl, ...CORS_HEADERS },
-      body: "",
+      statusCode: 200,
+      headers: { "Content-Type": "application/json", ...CORS_HEADERS },
+      body: JSON.stringify(cached),
     };
   }
 
   const videoUrl = `https://www.youtube.com/watch?v=${id}`;
-  console.log(`Extracting direct audio URL for track ID: ${id}`);
+  console.log(`Extracting audio stream info for track ID: ${id}`);
 
   const args = [
-    "-g",
-    "-f", "ba[ext=m4a]/ba[acodec^=mp4a]/ba/bestaudio",
+    "-f", FORMAT_SELECTOR,
+    "-j", // dump-json: gives us both the resolved URL and its protocol/ext
     "--no-warnings",
     ...authArgs(),
     videoUrl,
@@ -49,7 +68,7 @@ export const handler = async (event) => {
     const { code, stdoutData, stderrData } = await spawnYtDlp(args);
 
     if (code !== 0 || !stdoutData.trim()) {
-      console.error(`Error resolving audio URL for track ${id}:`, stderrData);
+      console.error(`Error resolving audio stream for track ${id}:`, stderrData);
       return {
         statusCode: 502,
         headers: { "Content-Type": "application/json", ...CORS_HEADERS },
@@ -60,15 +79,39 @@ export const handler = async (event) => {
       };
     }
 
-    const directAudioUrl = stdoutData.trim().split("\n")[0];
+    let info;
+    try {
+      info = JSON.parse(stdoutData.trim().split("\n")[0]);
+    } catch (parseErr) {
+      console.error(`Failed to parse yt-dlp JSON for track ${id}:`, parseErr.message);
+      return {
+        statusCode: 502,
+        headers: { "Content-Type": "application/json", ...CORS_HEADERS },
+        body: JSON.stringify({ error: "Could not parse stream info from yt-dlp" }),
+      };
+    }
 
-    // Cache stream URL for 2 hours
-    setCached(streamUrlCache, id, directAudioUrl, STREAM_CACHE_TTL_MS);
+    if (!info?.url) {
+      return {
+        statusCode: 502,
+        headers: { "Content-Type": "application/json", ...CORS_HEADERS },
+        body: JSON.stringify({ error: "yt-dlp did not return a playable URL" }),
+      };
+    }
+
+    const payload = {
+      url: info.url,
+      type: isHlsFormat(info) ? "hls" : "direct",
+      ext: info.ext || null,
+    };
+
+    // Cache resolved stream info for 2 hours (YouTube CDN URLs last ~6h).
+    setCached(streamUrlCache, id, payload, STREAM_CACHE_TTL_MS);
 
     return {
-      statusCode: 302,
-      headers: { Location: directAudioUrl, ...CORS_HEADERS },
-      body: "",
+      statusCode: 200,
+      headers: { "Content-Type": "application/json", ...CORS_HEADERS },
+      body: JSON.stringify(payload),
     };
   } catch (err) {
     // Without this catch, a rejected promise here (e.g. the yt-dlp binary

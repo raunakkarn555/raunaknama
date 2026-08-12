@@ -1,5 +1,13 @@
-import React, { useEffect, useState, useRef } from "react";
+import React, { useEffect, useState, useRef, useCallback } from "react";
+import Hls from "hls.js";
 import "./Player.css";
+
+// How long we trust a resolved stream URL client-side before re-resolving.
+// Kept comfortably under the server's own 2h cache window (see
+// STREAM_CACHE_TTL_MS in ytdlpService.mjs) so we basically never re-hit the
+// backend for a track that's already been resolved this session — that's
+// what makes prev/next feel instant instead of waiting on yt-dlp again.
+const CLIENT_STREAM_CACHE_TTL_MS = 100 * 60 * 1000;
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
 
@@ -119,6 +127,9 @@ export default function Player() {
 
   const audioRef = useRef(null);
   const consecutiveFailures = useRef(0);
+  const hlsRef = useRef(null);
+  const streamCacheRef = useRef(new Map()); // trackId -> { data: {url,type}, expires }
+  const loadTokenRef = useRef(0); // guards against a stale resolve landing after a newer track switch
 
   // 0. Fetch available playlists once. This runs in parallel with the
   // playlist-metadata fetch below (which now defaults to "default" instead
@@ -208,14 +219,41 @@ export default function Player() {
 
   const currentTrack =
     activeSource === "search" ? searchTrack : playlist?.tracks?.[currentIndex];
-  const streamUrl = currentTrack
-    ? `${API_BASE}/api/stream?id=${currentTrack.id}`
-    : "";
 
-  // 2b. Prefetch the next track's stream URL in the background so the
-  // /api/stream yt-dlp resolution (the slowest step in the chain) is
-  // already cached server-side by the time the person hits "next" — makes
-  // skipping feel instant instead of waiting on a fresh yt-dlp call.
+  // Resolves a track ID to { url, type: "direct"|"hls" }, via an in-memory
+  // client-side cache first (instant, no network at all) and falling back
+  // to /api/stream (which has its own server-side cache on top of yt-dlp).
+  const resolveStream = useCallback((trackId) => {
+    const cached = streamCacheRef.current.get(trackId);
+    if (cached && cached.expires > Date.now()) {
+      return Promise.resolve(cached.data);
+    }
+    return fetch(`${API_BASE}/api/stream?id=${trackId}`)
+      .then((res) => {
+        if (!res.ok) {
+          return res
+            .json()
+            .catch(() => ({}))
+            .then((body) => {
+              throw new Error(body.error || `Stream resolve failed (${res.status})`);
+            });
+        }
+        return res.json();
+      })
+      .then((data) => {
+        if (!data.url) throw new Error("No stream URL returned");
+        streamCacheRef.current.set(trackId, {
+          data,
+          expires: Date.now() + CLIENT_STREAM_CACHE_TTL_MS,
+        });
+        return data;
+      });
+  }, []);
+
+  // 2b. Prefetch the next track's stream info in the background — both the
+  // server-side yt-dlp cache AND our client-side cache get warmed, so by
+  // the time the person hits "next" there's zero yt-dlp wait and zero extra
+  // network round-trip, just an immediate src swap.
   useEffect(() => {
     if (!playlist || activeSource !== "playlist" || playlist.tracks.length < 2) return;
     const nextIdx =
@@ -224,32 +262,40 @@ export default function Player() {
         : (currentIndex + 1) % playlist.tracks.length;
     const nextTrack = playlist.tracks[nextIdx];
     if (!nextTrack) return;
-    const controller = new AbortController();
-    fetch(`${API_BASE}/api/stream?id=${nextTrack.id}`, {
-      method: "GET",
-      redirect: "manual", // don't actually follow/download the audio, just warm the cache
-      signal: controller.signal,
-    }).catch(() => {});
-    return () => controller.abort();
-  }, [playlist, currentIndex, shuffle, shuffleOrder, activeSource]);
+    resolveStream(nextTrack.id).catch(() => {});
+  }, [playlist, currentIndex, shuffle, shuffleOrder, activeSource, resolveStream]);
 
-  // 3. Managed Safe Audio Loading without Race Conditions
+  // 3. Managed Safe Audio Loading without Race Conditions.
+  // Resolves the current track to a real URL + format type, then either:
+  //   - hands the URL straight to the <audio> element (direct/progressive), or
+  //   - spins up hls.js to play an HLS (.m3u8) stream, which plain <audio
+  //     src="..."> cannot do in Chrome/Firefox.
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio) return;
 
-    if (!streamUrl) {
+    if (hlsRef.current) {
+      hlsRef.current.destroy();
+      hlsRef.current = null;
+    }
+
+    if (!currentTrack) {
+      audio.removeAttribute("src");
       audio.pause();
       return;
     }
+
+    const token = ++loadTokenRef.current;
+    let cancelled = false;
 
     setCurrentTime(0);
     setDuration(0);
     setPlaybackError(null);
 
-    audio.load();
+    const wantsPlay = isPlaying;
 
-    if (isPlaying) {
+    const startPlayback = () => {
+      if (!wantsPlay) return;
       const playPromise = audio.play();
       if (playPromise !== undefined) {
         playPromise.catch((err) => {
@@ -259,8 +305,64 @@ export default function Player() {
           }
         });
       }
-    }
-  }, [streamUrl]);
+    };
+
+    resolveStream(currentTrack.id)
+      .then((data) => {
+        if (cancelled || token !== loadTokenRef.current) return;
+
+        const nativeHlsSupport = audio.canPlayType("application/vnd.apple.mpegurl");
+
+        if (data.type === "hls" && !nativeHlsSupport) {
+          if (!Hls.isSupported()) {
+            setPlaybackError("This browser can't play this track's stream format.");
+            return;
+          }
+          const hls = new Hls({
+            enableWorker: true,
+            maxBufferLength: 30,
+            backBufferLength: 30,
+          });
+          hlsRef.current = hls;
+          hls.on(Hls.Events.ERROR, (_evt, errData) => {
+            if (!errData.fatal || cancelled || token !== loadTokenRef.current) return;
+            console.warn("HLS fatal error:", errData.type, errData.details);
+            handleStreamFailure();
+          });
+          hls.on(Hls.Events.MANIFEST_PARSED, () => {
+            if (cancelled || token !== loadTokenRef.current) return;
+            startPlayback();
+          });
+          hls.loadSource(data.url);
+          hls.attachMedia(audio);
+        } else {
+          // Direct/progressive URL — or a browser (Safari) that plays HLS
+          // natively via the <audio> element, no hls.js needed.
+          audio.src = data.url;
+          audio.load();
+          startPlayback();
+        }
+      })
+      .catch((err) => {
+        if (cancelled || token !== loadTokenRef.current) return;
+        console.warn("Stream resolve error:", err.message || err);
+        handleStreamFailure("Couldn't fetch a stream for this track — skipping…");
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentTrack?.id, activeSource, resolveStream]);
+
+  // Tear down any live hls.js instance when the component unmounts.
+  useEffect(() => {
+    return () => {
+      if (hlsRef.current) {
+        hlsRef.current.destroy();
+        hlsRef.current = null;
+      }
+    };
+  }, []);
 
   // 4. Playback Controls
   const handleNext = () => {
@@ -308,9 +410,7 @@ export default function Player() {
     }
   };
 
-  const handleAudioError = () => {
-    const mediaError = audioRef.current?.error;
-    console.warn("Audio element error:", mediaError?.message || mediaError);
+  const handleStreamFailure = (message) => {
     setIsPlaying(false);
 
     consecutiveFailures.current += 1;
@@ -321,11 +421,16 @@ export default function Player() {
       return;
     }
 
-    setPlaybackError("Couldn't play this track — skipping…");
+    setPlaybackError(message || "Couldn't play this track — skipping…");
     if (activeSource === "playlist" && playlist && playlist.tracks.length > 1) {
-      const timer = setTimeout(() => handleNext(), 1200);
-      return () => clearTimeout(timer);
+      setTimeout(() => handleNext(), 1200);
     }
+  };
+
+  const handleAudioError = () => {
+    const mediaError = audioRef.current?.error;
+    console.warn("Audio element error:", mediaError?.message || mediaError);
+    handleStreamFailure();
   };
 
   const handleAudioPlaying = () => {
@@ -484,7 +589,6 @@ export default function Player() {
 
             <audio
               ref={audioRef}
-              src={streamUrl}
               onPlay={() => setIsPlaying(true)}
               onPlaying={handleAudioPlaying}
               onPause={() => setIsPlaying(false)}
