@@ -11,6 +11,31 @@ const CLIENT_STREAM_CACHE_TTL_MS = 100 * 60 * 1000;
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
 
+// Wraps fetch() so that a raw network-level failure (TypeError: Failed to
+// fetch — DNS/connection refused/CORS/blocked-by-extension, i.e. the
+// request never got a response at all) is reported distinctly from a real
+// server-side error (4xx/5xx, which DOES get a response). In production
+// this is almost always caused by the Netlify Functions not being deployed
+// at all (wrong base directory / drag-and-drop deploy instead of a
+// git-connected build) rather than a bug in the function itself — so
+// surfacing which case we're in makes that immediately obvious in the
+// console instead of a generic "Failed to fetch" that could mean anything.
+function describeFetchFailure(err, url) {
+  if (err instanceof TypeError) {
+    return (
+      `Network-level failure calling ${url} — the request never reached ` +
+      `the server. On Netlify this almost always means the serverless ` +
+      `function isn't deployed (check the Functions tab in the Netlify ` +
+      `dashboard — if it's empty, the site was likely deployed without ` +
+      `running the build, e.g. via drag-and-drop of the dist folder, or ` +
+      `the repo's base directory isn't pointed at the folder containing ` +
+      `netlify.toml). It can also be a browser extension blocking the ` +
+      `request — try Incognito with extensions off to rule that out.`
+    );
+  }
+  return err.message;
+}
+
 const formatTime = (secs) => {
   if (!secs || Number.isNaN(secs) || !Number.isFinite(secs)) return "0:00";
   const m = Math.floor(secs / 60);
@@ -225,8 +250,12 @@ export default function Player() {
   // of waiting on this to resolve first) — cuts a full network round-trip
   // off the time-to-first-track.
   useEffect(() => {
-    fetch(`${API_BASE}/api/playlists`)
-      .then((res) => res.json())
+    const url = `${API_BASE}/api/playlists`;
+    fetch(url)
+      .then((res) => {
+        if (!res.ok) throw new Error(`/api/playlists returned ${res.status}`);
+        return res.json();
+      })
       .then((data) => {
         if (data.playlists && data.playlists.length > 0) {
           setPlaylists(data.playlists);
@@ -235,7 +264,7 @@ export default function Player() {
           );
         }
       })
-      .catch((err) => console.error("Playlists list fetch error:", err));
+      .catch((err) => console.error("Playlists list fetch error:", describeFetchFailure(err, url)));
   }, []);
 
   // 0b. Safety net: never let the "Warming up the mic…" state hang forever.
@@ -283,9 +312,10 @@ export default function Player() {
     setLoading(true);
     setError(null);
 
-    fetch(`${API_BASE}/api/playlist?playlistId=${activePlaylistId}`)
+    const url = `${API_BASE}/api/playlist?playlistId=${activePlaylistId}`;
+    fetch(url)
       .then((res) => {
-        if (!res.ok) throw new Error("Failed to load playlist from server");
+        if (!res.ok) throw new Error(`Failed to load playlist from server (status ${res.status})`);
         return res.json();
       })
       .then((data) => {
@@ -301,8 +331,12 @@ export default function Player() {
         setLoading(false);
       })
       .catch((err) => {
-        console.error("Playlist Fetch Error:", err);
-        setError("Could not connect to streaming server.");
+        console.error("Playlist Fetch Error:", describeFetchFailure(err, url));
+        setError(
+          err instanceof TypeError
+            ? "Could not reach the streaming server (network error) — see console for details."
+            : "Could not connect to streaming server."
+        );
         setLoading(false);
       });
   }, [activePlaylistId, customPlaylists]);

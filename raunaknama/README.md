@@ -214,44 +214,66 @@ Refresh the site and the new track shows up in the queue.
 
 ---
 
-## 5. Hosting it online — one deploy, on Vercel or Netlify
+## 5. Hosting it online — Netlify (git-connected build required)
 
-Because there's no backend server anymore (Firebase *is* the backend), this
-is now a plain static site. **Either Vercel or Netlify works equally well**
-— pick whichever you're more comfortable with. Steps below for both.
+This app is **not** a plain static site — the frontend (Firebase-backed
+UI) plus a real backend both ship together: `netlify/functions/*` run
+yt-dlp server-side to resolve playable audio streams from YouTube, exposed
+at `/api/*` via the redirect in `netlify.toml`. That backend only gets
+built and deployed if Netlify actually runs `npm install` + `npm run
+build` from this repo — **it will not work if you drag-and-drop the
+built `dist/` folder into Netlify's UI**, because that skips the build
+entirely and no functions get created. (If `/api/playlists` throws
+`TypeError: Failed to fetch` in the browser console on the deployed site
+but works locally, this is almost always the cause.)
 
 First, push this project to a GitHub repo (don't forget: `.env` and
 `serviceAccountKey.json` should **not** be committed — `.gitignore` already
 excludes them).
 
-### Option A — Vercel
-
-1. Go to [vercel.com](https://vercel.com) → **Add New → Project** → import
-   your GitHub repo.
-2. Framework preset: Vercel auto-detects **Vite** — leave build command as
-   `npm run build` and output directory as `dist`.
-3. Under **Environment Variables**, add every `VITE_FIREBASE_*` key from your
-   `.env` file (same names, same values).
-4. Click **Deploy**.
-
-### Option B — Netlify
-
 1. Go to [netlify.com](https://netlify.com) → **Add new site → Import an
    existing project** → connect your GitHub repo.
-2. Build command: `npm run build`. Publish directory: `dist`.
-3. Under **Site configuration → Environment variables**, add every
+2. **Base directory**: if this `raunaknama/` folder is nested inside your
+   repo (rather than being the repo root itself), you must set the base
+   directory to `raunaknama` in Netlify's site settings — otherwise Netlify
+   won't find `netlify.toml`, `package.json`, or `netlify/functions/` at
+   all and every `/api/*` call will fail. If the contents of this folder
+   *are* your repo root, leave it blank.
+3. Build command: `npm run build`. Publish directory: `dist`. Functions
+   directory: `netlify/functions` (all three should be auto-read from
+   `netlify.toml`, but double-check them in **Site configuration → Build &
+   deploy** if functions still don't show up after deploying).
+4. Under **Site configuration → Environment variables**, add every
    `VITE_FIREBASE_*` key from your `.env` file.
-4. Click **Deploy site**.
+5. Optional but recommended: add `YTDLP_COOKIES_B64` (a base64-encoded
+   YouTube `cookies.txt`) as an environment variable too — YouTube
+   frequently rate-limits or blocks requests from cloud IPs (which is what
+   Netlify Functions run on) when no cookies are present. Without it,
+   `/api/playlist`, `/api/search`, and `/api/stream` may intermittently
+   fail even once functions are deploying correctly.
+6. Click **Deploy site**. Once deployed, open
+   `https://<your-site>.netlify.app/api/health` directly in a browser tab —
+   it should return `{"ok":true,...}` as JSON. If instead you get a 404
+   page or the tab hangs, the functions genuinely aren't deployed and you
+   need to fix step 2/3 above (check the **Functions** tab in your Netlify
+   site dashboard — it should list `playlists`, `playlist`, `search`,
+   `stream`, and `health`; if that list is empty, that confirms it).
 
-That's it — one deploy, no separate backend to host, no `CLIENT_ORIGIN` or
-CORS config needed (Firebase handles access purely through the security
-rules you set up in section 2).
+No `CLIENT_ORIGIN` or CORS config is needed for the Firebase calls
+(Firebase handles access purely through the security rules you set up in
+section 2), and the `/api/*` functions already send permissive CORS
+headers for same-origin use.
 
 > **Note:** by default Firebase's free Spark plan allows any website to call
 > your Firestore/Realtime Database as long as it matches your security
 > rules — there's no built-in domain allow-list on the free plan. The rules
 > in this project intentionally only allow public *read* on the playlist and
 > a narrow *write* on the presence path, so this is safe to leave open.
+
+> Deploying to Vercel instead is possible for the Firebase-only *frontend*,
+> but the `netlify/functions/*` backend is Netlify-specific (uses the
+> Netlify Functions handler signature and `netlify.toml` redirects) and
+> would need to be ported to Vercel's serverless function format first.
 
 ---
 
