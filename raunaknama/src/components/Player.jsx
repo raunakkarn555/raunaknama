@@ -123,6 +123,14 @@ const SaveIcon = () => (
   </svg>
 );
 
+const UploadIcon = () => (
+  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M12 15V5" />
+    <path d="M7 10l5-5 5 5" />
+    <path d="M5 19h14" />
+  </svg>
+);
+
 const TrashIcon = () => (
   <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
     <path d="M4 7h16" />
@@ -205,6 +213,7 @@ export default function Player() {
   const [addToPlaylistFeedback, setAddToPlaylistFeedback] = useState("");
 
   const audioRef = useRef(null);
+  const importFileInputRef = useRef(null); // hidden <input type="file"> for restoring a local-playlists backup
   const consecutiveFailures = useRef(0);
   const hlsRef = useRef(null);
   const streamCacheRef = useRef(new Map()); // trackId -> { data: {url,type}, expires }
@@ -640,8 +649,30 @@ export default function Player() {
 
   const selectPlaylistTrack = (idx) => {
     setActiveSource("playlist");
-    setCurrentIndex(idx);
     setIsPlaying(true);
+
+    if (idx === currentIndex) {
+      // Same track is already selected (e.g. this is the only song in a
+      // playlist that was just created/added to) — the track-loading
+      // effect keys off currentTrack?.id, so it won't re-fire here and
+      // nothing would actually tell the <audio> element to play, even
+      // though setIsPlaying(true) makes the UI look like it's playing.
+      // Kick playback directly instead.
+      const audio = audioRef.current;
+      if (audio) {
+        const playPromise = audio.play();
+        if (playPromise !== undefined) {
+          playPromise.catch((err) => {
+            if (err.name !== "AbortError") {
+              console.warn("Play error:", err.message || err);
+              setIsPlaying(false);
+            }
+          });
+        }
+      }
+    } else {
+      setCurrentIndex(idx);
+    }
   };
 
   const playSearchResult = (track) => {
@@ -767,6 +798,104 @@ export default function Player() {
     persistLocalPlaylists(next);
   };
 
+  // --- Backup (download) and restore (upload) for the on-device custom
+  // playlists ---
+  // These playlists live ONLY in this browser's localStorage (see the note
+  // at the top of the file), so they disappear if the site's cache/data
+  // gets cleared, or simply don't exist on a different device/browser.
+  // These two handlers let the listener download a JSON snapshot of
+  // everything they've saved here, and later load that same file back in
+  // — on this device or any other — to restore it. Like everything else
+  // in this block, neither of these ever talks to the server.
+  const handleExportLocalPlaylists = () => {
+    try {
+      const payload = {
+        app: "raunaknama",
+        type: "local-playlists-backup",
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        playlists: customPlaylists,
+      };
+      const blob = new Blob([JSON.stringify(payload, null, 2)], {
+        type: "application/json",
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      const stamp = new Date().toISOString().slice(0, 10);
+      a.href = url;
+      a.download = `raunaknama-playlists-backup-${stamp}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.warn("Could not export local playlists:", err);
+      window.alert("Couldn't create the backup file — see console for details.");
+    }
+  };
+
+  const triggerImportLocalPlaylists = () => {
+    importFileInputRef.current?.click();
+  };
+
+  const handleImportLocalPlaylistsFile = (e) => {
+    const file = e.target.files && e.target.files[0];
+    // Reset the input so picking the same file again still fires onChange.
+    e.target.value = "";
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(reader.result);
+        const incoming = Array.isArray(parsed) ? parsed : parsed.playlists;
+        if (!Array.isArray(incoming)) {
+          throw new Error("This file doesn't look like a playlists backup.");
+        }
+
+        // Merge rather than overwrite: a playlist missing locally (deleted,
+        // or this is a different browser) is restored in full; a playlist
+        // that still exists locally gets the backup's tracks merged in
+        // (de-duplicated by track id) so nothing added since the backup
+        // was taken gets lost.
+        const merged = [...customPlaylists];
+        let restoredCount = 0;
+        incoming.forEach((incomingPlaylist) => {
+          if (
+            !incomingPlaylist ||
+            !incomingPlaylist.id ||
+            !Array.isArray(incomingPlaylist.tracks)
+          ) {
+            return;
+          }
+          restoredCount += 1;
+          const existingIdx = merged.findIndex((p) => p.id === incomingPlaylist.id);
+          if (existingIdx === -1) {
+            merged.push(incomingPlaylist);
+          } else {
+            const existing = merged[existingIdx];
+            const existingTrackIds = new Set(existing.tracks.map((t) => t.id));
+            const mergedTracks = [
+              ...existing.tracks,
+              ...incomingPlaylist.tracks.filter((t) => t && !existingTrackIds.has(t.id)),
+            ];
+            merged[existingIdx] = { ...existing, tracks: mergedTracks };
+          }
+        });
+
+        setCustomPlaylists(merged);
+        persistLocalPlaylists(merged);
+        window.alert(`Restored ${restoredCount} playlist(s) from backup.`);
+      } catch (err) {
+        console.warn("Could not import local playlists:", err);
+        window.alert(
+          "Couldn't read that file — make sure it's a playlists backup exported from here."
+        );
+      }
+    };
+    reader.readAsText(file);
+  };
+
   const isActivePlaylistLocal = activePlaylistId.startsWith("local:");
 
   const showResultsDropdown = searchFocused && (searchQuery.trim().length > 0);
@@ -819,6 +948,32 @@ export default function Player() {
         <p className="local-playlists-note">
           <DeviceIcon /> Ye custom playlists sirf isi device/browser par locally save hoti hain, server par nahi — cache ya browser data clear karne par ye gayab ho jayengi.
         </p>
+
+        <div className="local-playlists-backup-actions">
+          <button
+            type="button"
+            className="playlist-modal-btn playlist-modal-btn--ghost local-playlists-backup-btn"
+            onClick={handleExportLocalPlaylists}
+            title="Download all your on-device playlists as a JSON backup file"
+          >
+            <SaveIcon /> Download backup
+          </button>
+          <button
+            type="button"
+            className="playlist-modal-btn playlist-modal-btn--ghost local-playlists-backup-btn"
+            onClick={triggerImportLocalPlaylists}
+            title="Restore playlists from a previously downloaded backup file"
+          >
+            <UploadIcon /> Upload backup
+          </button>
+          <input
+            ref={importFileInputRef}
+            type="file"
+            accept="application/json,.json"
+            onChange={handleImportLocalPlaylistsFile}
+            style={{ display: "none" }}
+          />
+        </div>
       </div>
 
       <div className="search-wrap">
