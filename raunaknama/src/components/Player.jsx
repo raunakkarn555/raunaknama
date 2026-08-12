@@ -235,7 +235,14 @@ export default function Player() {
             .json()
             .catch(() => ({}))
             .then((body) => {
-              throw new Error(body.error || `Stream resolve failed (${res.status})`);
+              // Keep both the short error and the raw yt-dlp details (when
+              // present) so the console shows the *actual* reason a stream
+              // failed to resolve — e.g. "YouTube blocked server IP. Please
+              // set YTDLP_COOKIES_B64..." — instead of a vague generic
+              // message that hides what's actually wrong.
+              const err = new Error(body.error || `Stream resolve failed (${res.status})`);
+              err.details = body.details;
+              throw err;
             });
         }
         return res.json();
@@ -345,8 +352,8 @@ export default function Player() {
       })
       .catch((err) => {
         if (cancelled || token !== loadTokenRef.current) return;
-        console.warn("Stream resolve error:", err.message || err);
-        handleStreamFailure("Couldn't fetch a stream for this track — skipping…");
+        console.warn("Stream resolve error:", err.message, err.details ? `— ${err.details}` : "");
+        handleStreamFailure(err.details || err.message);
       });
 
     return () => {
@@ -412,6 +419,16 @@ export default function Player() {
 
   const handleStreamFailure = (message) => {
     setIsPlaying(false);
+
+    // "Sign in to confirm you're not a bot" / cookie-required failures are a
+    // config problem, not a bad track — every track will fail the same way,
+    // so skipping through the whole playlist just burns yt-dlp calls and
+    // buries the real reason under "skipping…" noise. Surface it plainly
+    // and stop, rather than auto-advancing.
+    if (message && /cookie|sign in to confirm/i.test(message)) {
+      setPlaybackError(message);
+      return;
+    }
 
     consecutiveFailures.current += 1;
     if (consecutiveFailures.current > 3) {

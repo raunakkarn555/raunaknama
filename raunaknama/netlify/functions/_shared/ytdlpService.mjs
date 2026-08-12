@@ -61,12 +61,17 @@ function resolveCookiesPath() {
 
 const COOKIES_PATH = resolveCookiesPath();
 
-// Extra args appended to every yt-dlp call
+// Extra args appended to every yt-dlp call.
+//
+// NOTE: this used to force `--extractor-args youtube:player_client=ios,android,web`.
+// That's a mistake to hardcode — yt-dlp's own maintainers actively add/remove
+// player clients as YouTube breaks them (e.g. ios_downgraded and tv_embedded
+// were both pulled as broken in early 2026 releases), and scripts/download-ytdlp.mjs
+// always fetches the *latest* yt-dlp release on install. Pinning our own client
+// list here means we silently fight yt-dlp's own up-to-date defaults instead of
+// benefiting from them. So: let yt-dlp choose.
 export function authArgs() {
-  const args = [
-    "--js-runtimes", "node",
-    "--extractor-args", "youtube:player_client=ios,android,web",
-  ];
+  const args = ["--js-runtimes", "node"];
   if (COOKIES_PATH) {
     args.push("--cookies", COOKIES_PATH);
   }

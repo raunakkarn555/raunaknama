@@ -150,6 +150,46 @@ Raunaknama, hear your playlist, and see the listener count tick up.
 
 ---
 
+## 3.5 YouTube cookies — required, not optional
+
+As of 2026, YouTube blocks almost all *stream URL* extraction (i.e. actually
+playing a track — `/api/stream`) from an anonymous/unsigned-in session with
+"Sign in to confirm you're not a bot." Playlist listing and search
+(`/api/playlist`, `/api/search`) don't need this — they use a lighter
+metadata-only call that isn't blocked — but playback will not work at all
+without cookies. If tracks fail with a 502 and the console shows "Sign in
+to confirm" or "YouTube blocked server IP," this is why.
+
+**Get cookies.txt:**
+1. Open a **private/incognito browser window** and log into youtube.com
+   with any Google account (a throwaway account is fine and safer than your
+   main one).
+2. Install a cookie-export extension (e.g. "Get cookies.txt LOCALLY" for
+   Chrome/Firefox) and export cookies for `youtube.com` in Netscape format.
+3. **Don't log out or close-then-reopen that window afterward** — YouTube
+   rotates session cookies, and logging out invalidates the export
+   immediately. Just close the window once you've exported.
+
+**Wire it up locally** — pick one:
+```bash
+# Option A: point at the file directly
+echo 'YTDLP_COOKIES_PATH=/absolute/path/to/cookies.txt' >> .env
+
+# Option B: base64-encode it into the env (handy for Netlify's env var UI,
+# which doesn't take file uploads)
+echo "YTDLP_COOKIES_B64=$(base64 -w0 cookies.txt)" >> .env   # Linux
+echo "YTDLP_COOKIES_B64=$(base64 -i cookies.txt)" >> .env    # macOS
+```
+
+**On Netlify:** Site settings → Environment variables → add `YTDLP_COOKIES_B64`
+with the base64 string from Option B above (file paths don't make sense on
+a deployed function, only the base64 form does).
+
+Cookies go stale after a few weeks to months — if playback that used to work
+suddenly starts 502ing again, re-export and re-set the variable.
+
+---
+
 ## 4. Editing your playlist later
 
 You have two options — no server to restart either way:
