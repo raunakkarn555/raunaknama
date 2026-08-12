@@ -484,19 +484,27 @@ export default function Player() {
   // Autoplay: when a track that isn't part of a playlist (i.e. one played
   // via search) finishes, look up tracks similar to it (same channel/title
   // via the existing search endpoint) and keep the chain going forever,
-  // never repeating a recently-played pick.
+  // never repeating a recently-played pick. Candidates are biased toward
+  // actual songs (query includes "song") and capped at 10 minutes so we
+  // don't autoplay into full mixes, podcasts, or long videos.
+  const MAX_AUTOPLAY_DURATION_SECS = 10 * 60;
+
   const playNextAutoplayTrack = () => {
     const seed = currentTrack;
     if (!seed) {
       setIsPlaying(false);
       return;
     }
-    const q = seed.channel || seed.title;
+    const q = `${seed.channel || seed.title} song`;
     fetch(`${API_BASE}/api/search?q=${encodeURIComponent(q)}`)
       .then((res) => res.json())
       .then((data) => {
         const candidates = (data.results || []).filter(
-          (t) => t.id !== seed.id && !autoplayHistoryRef.current.has(t.id)
+          (t) =>
+            t.id !== seed.id &&
+            !autoplayHistoryRef.current.has(t.id) &&
+            t.duration &&
+            t.duration <= MAX_AUTOPLAY_DURATION_SECS
         );
         const next = candidates[Math.floor(Math.random() * candidates.length)];
         if (!next) {
@@ -520,6 +528,11 @@ export default function Player() {
   // Fired when the <audio> element's "ended" event fires. Routes to the
   // right "next track" behavior depending on where the current track came
   // from, but only when autoplay is switched on.
+  //
+  // Note: the browser fires "pause" right before "ended", which flips
+  // isPlaying to false via the existing onPause handler. For the playlist
+  // branch we re-assert isPlaying(true) after advancing so the newly loaded
+  // track actually starts playing instead of loading silently.
   const handleTrackEnded = () => {
     if (!autoplay) {
       setIsPlaying(false);
@@ -529,6 +542,7 @@ export default function Player() {
       playNextAutoplayTrack();
     } else {
       handleNext();
+      setIsPlaying(true);
     }
   };
 
