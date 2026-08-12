@@ -107,6 +107,63 @@ const CloseIcon = () => (
   </svg>
 );
 
+// --- Icons for the local (on-device) custom playlist feature ---
+
+const PlusIcon = () => (
+  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M12 5v14M5 12h14" />
+  </svg>
+);
+
+const SaveIcon = () => (
+  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M12 5v10" />
+    <path d="M7 10l5 5 5-5" />
+    <path d="M5 19h14" />
+  </svg>
+);
+
+const TrashIcon = () => (
+  <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M4 7h16" />
+    <path d="M9 7V4h6v3" />
+    <path d="M6 7l1 13h10l1-13" />
+  </svg>
+);
+
+const DeviceIcon = () => (
+  <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <rect x="3" y="4" width="18" height="13" rx="2" />
+    <path d="M8 21h8M12 17v4" />
+  </svg>
+);
+
+// --- Local (on-device) custom playlist storage ---
+// These playlists are created by the listener and saved ONLY in this
+// browser's localStorage — never sent to, or fetched from, the server.
+// That means: (a) they're per-device/per-browser, and (b) clearing the
+// browser's site data/cache, or using a different device, wipes them.
+const LOCAL_PLAYLISTS_STORAGE_KEY = "raunaknama_local_playlists_v1";
+
+const loadLocalPlaylists = () => {
+  try {
+    const raw = window.localStorage.getItem(LOCAL_PLAYLISTS_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (err) {
+    console.warn("Could not read local playlists from this device's storage:", err);
+    return [];
+  }
+};
+
+const persistLocalPlaylists = (list) => {
+  try {
+    window.localStorage.setItem(LOCAL_PLAYLISTS_STORAGE_KEY, JSON.stringify(list));
+  } catch (err) {
+    console.warn("Could not save local playlists to this device's storage:", err);
+  }
+};
+
 export default function Player() {
   const [playlist, setPlaylist] = useState(null);
   const [currentIndex, setCurrentIndex] = useState(0);
@@ -138,6 +195,14 @@ export default function Player() {
   const [showQueue, setShowQueue] = useState(false);
 
   const [playbackError, setPlaybackError] = useState(null);
+
+  // Custom playlists that any listener can create — saved only on THIS
+  // device (localStorage), never on the server.
+  const [customPlaylists, setCustomPlaylists] = useState(() => loadLocalPlaylists());
+  const [showCreatePlaylistModal, setShowCreatePlaylistModal] = useState(false);
+  const [newPlaylistName, setNewPlaylistName] = useState("");
+  const [addToPlaylistTrack, setAddToPlaylistTrack] = useState(null); // track object currently being saved
+  const [addToPlaylistFeedback, setAddToPlaylistFeedback] = useState("");
 
   const audioRef = useRef(null);
   const consecutiveFailures = useRef(0);
@@ -183,6 +248,29 @@ export default function Player() {
   // 1. Fetch Playlist Metadata
   useEffect(() => {
     if (!activePlaylistId) return;
+
+    // Local (on-device) custom playlists never touch the network — they're
+    // read straight out of component state, which itself is backed by
+    // this browser's localStorage.
+    if (activePlaylistId.startsWith("local:")) {
+      const local = customPlaylists.find((p) => p.id === activePlaylistId);
+      setPlaylist({
+        playlistTitle: local ? local.label : "Custom playlist",
+        tracks: local ? local.tracks : [],
+      });
+      setCurrentIndex(0);
+      setShuffle(false);
+      setShuffleOrder([]);
+      setActiveSource("playlist");
+      setError(
+        local && local.tracks.length === 0
+          ? "This playlist is empty — use the + button on any song to add it here."
+          : null
+      );
+      setLoading(false);
+      return;
+    }
+
     setLoading(true);
     setError(null);
 
@@ -208,7 +296,7 @@ export default function Player() {
         setError("Could not connect to streaming server.");
         setLoading(false);
       });
-  }, [activePlaylistId]);
+  }, [activePlaylistId, customPlaylists]);
 
   // 2. Search Debounce
   useEffect(() => {
@@ -587,6 +675,100 @@ export default function Player() {
     setSearchResults([]);
   };
 
+  // --- Local (on-device) custom playlist handlers ---
+  // Every one of these only ever touches component state + localStorage —
+  // nothing here ever calls the server.
+
+  const openCreatePlaylistModal = () => {
+    setNewPlaylistName("");
+    setShowCreatePlaylistModal(true);
+  };
+
+  const closeCreatePlaylistModal = () => {
+    setShowCreatePlaylistModal(false);
+    setNewPlaylistName("");
+  };
+
+  const handleCreatePlaylist = (e) => {
+    e.preventDefault();
+    const label = newPlaylistName.trim();
+    if (!label) return;
+
+    const newPlaylist = {
+      id: `local:${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      label,
+      tracks: addToPlaylistTrack ? [addToPlaylistTrack] : [],
+      createdAt: Date.now(),
+    };
+
+    const next = [...customPlaylists, newPlaylist];
+    setCustomPlaylists(next);
+    persistLocalPlaylists(next);
+    setShowCreatePlaylistModal(false);
+    setNewPlaylistName("");
+
+    if (addToPlaylistTrack) {
+      setAddToPlaylistFeedback(`Saved to "${label}" on this device`);
+      setAddToPlaylistTrack(null);
+      setTimeout(() => setAddToPlaylistFeedback(""), 2000);
+    } else {
+      setActivePlaylistId(newPlaylist.id);
+    }
+  };
+
+  const handleDeleteLocalPlaylist = (playlistId, e) => {
+    e.stopPropagation();
+    const next = customPlaylists.filter((p) => p.id !== playlistId);
+    setCustomPlaylists(next);
+    persistLocalPlaylists(next);
+    if (activePlaylistId === playlistId) {
+      setActivePlaylistId(playlists.length > 0 ? playlists[0].id : "default");
+    }
+  };
+
+  // Opens the "save this song to a playlist" picker for a given track
+  // (works for search results, the currently-playing track, and tracks
+  // already sitting in a server playlist's queue).
+  const openAddToPlaylistPicker = (track) => {
+    setAddToPlaylistFeedback("");
+    setAddToPlaylistTrack(track);
+  };
+
+  const closeAddToPlaylistPicker = () => {
+    setAddToPlaylistTrack(null);
+    setAddToPlaylistFeedback("");
+  };
+
+  const handleAddTrackToLocalPlaylist = (playlistId) => {
+    if (!addToPlaylistTrack) return;
+    const next = customPlaylists.map((p) => {
+      if (p.id !== playlistId) return p;
+      const alreadyIn = p.tracks.some((t) => t.id === addToPlaylistTrack.id);
+      if (alreadyIn) return p;
+      return { ...p, tracks: [...p.tracks, addToPlaylistTrack] };
+    });
+    setCustomPlaylists(next);
+    persistLocalPlaylists(next);
+
+    const target = next.find((p) => p.id === playlistId);
+    setAddToPlaylistFeedback(`Saved to "${target?.label}" on this device`);
+    setTimeout(() => {
+      setAddToPlaylistTrack(null);
+      setAddToPlaylistFeedback("");
+    }, 900);
+  };
+
+  const handleRemoveTrackFromLocalPlaylist = (trackId, e) => {
+    e.stopPropagation();
+    const next = customPlaylists.map((p) =>
+      p.id === activePlaylistId ? { ...p, tracks: p.tracks.filter((t) => t.id !== trackId) } : p
+    );
+    setCustomPlaylists(next);
+    persistLocalPlaylists(next);
+  };
+
+  const isActivePlaylistLocal = activePlaylistId.startsWith("local:");
+
   const showResultsDropdown = searchFocused && (searchQuery.trim().length > 0);
 
   return (
@@ -606,6 +788,38 @@ export default function Player() {
           ))}
         </div>
       )}
+
+      <div className="local-playlists-block">
+        <div className="playlist-tabs local-playlists-tabs" role="tablist" aria-label="Your custom playlists">
+          {customPlaylists.map((p) => (
+            <button
+              key={p.id}
+              role="tab"
+              aria-selected={p.id === activePlaylistId}
+              className={`playlist-tab is-local ${p.id === activePlaylistId ? "is-active" : ""}`}
+              onClick={() => setActivePlaylistId(p.id)}
+            >
+              <DeviceIcon />
+              <span>{p.label}</span>
+              <span
+                className="playlist-tab-delete"
+                role="button"
+                aria-label={`Delete playlist ${p.label}`}
+                onClick={(e) => handleDeleteLocalPlaylist(p.id, e)}
+              >
+                <TrashIcon />
+              </span>
+            </button>
+          ))}
+          <button className="playlist-tab playlist-tab--create" onClick={openCreatePlaylistModal}>
+            <PlusIcon />
+            <span>New playlist</span>
+          </button>
+        </div>
+        <p className="local-playlists-note">
+          <DeviceIcon /> Ye custom playlists sirf isi device/browser par locally save hoti hain, server par nahi — cache ya browser data clear karne par ye gayab ho jayengi.
+        </p>
+      </div>
 
       <div className="search-wrap">
         <div className={`search-box ${searchFocused ? "is-focused" : ""}`}>
@@ -640,8 +854,23 @@ export default function Player() {
                   className="search-result-item"
                   onMouseDown={() => playSearchResult(track)}
                 >
-                  <span className="search-result-title line-clamp-2">{track.title}</span>
-                  {track.channel && <span className="search-result-channel">{track.channel}</span>}
+                  <div className="search-result-text">
+                    <span className="search-result-title line-clamp-2">{track.title}</span>
+                    {track.channel && <span className="search-result-channel">{track.channel}</span>}
+                  </div>
+                  <button
+                    type="button"
+                    className="add-to-playlist-btn"
+                    aria-label={`Save ${track.title} to a playlist`}
+                    title="Save to playlist (on this device)"
+                    onMouseDown={(e) => {
+                      e.stopPropagation();
+                      e.preventDefault();
+                      openAddToPlaylistPicker(track);
+                    }}
+                  >
+                    <PlusIcon />
+                  </button>
                 </div>
               ))}
           </div>
@@ -666,12 +895,23 @@ export default function Player() {
       {!loading && !error && currentTrack && (
         <>
           <div className="player-card-header">
-            <span className="eyebrow">
-              {activeSource === "search" ? "Playing from search" : "Now Playing"}
-            </span>
-            <h2 className="playlist-title">
-              {activeSource === "search" ? "Custom pick" : playlist?.playlistTitle}
-            </h2>
+            <div>
+              <span className="eyebrow">
+                {activeSource === "search" ? "Playing from search" : "Now Playing"}
+              </span>
+              <h2 className="playlist-title">
+                {activeSource === "search" ? "Custom pick" : playlist?.playlistTitle}
+              </h2>
+            </div>
+            <button
+              type="button"
+              className="add-to-playlist-btn add-to-playlist-btn--header"
+              aria-label={`Save ${currentTrack.title} to a playlist`}
+              title="Save to playlist (on this device)"
+              onClick={() => openAddToPlaylistPicker(currentTrack)}
+            >
+              <SaveIcon />
+            </button>
           </div>
 
           <div className="stage-main">
@@ -795,6 +1035,30 @@ export default function Player() {
                         {isSelected ? (isPlaying ? "♪" : "❚❚") : idx + 1}
                       </span>
                       <span className="queue-item-title line-clamp-2">{track.title}</span>
+                      {isActivePlaylistLocal ? (
+                        <span
+                          className="queue-item-action"
+                          role="button"
+                          aria-label={`Remove ${track.title} from this playlist`}
+                          title="Remove from this playlist"
+                          onClick={(e) => handleRemoveTrackFromLocalPlaylist(track.id, e)}
+                        >
+                          <TrashIcon />
+                        </span>
+                      ) : (
+                        <span
+                          className="queue-item-action"
+                          role="button"
+                          aria-label={`Save ${track.title} to a playlist`}
+                          title="Save to playlist (on this device)"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            openAddToPlaylistPicker(track);
+                          }}
+                        >
+                          <PlusIcon />
+                        </span>
+                      )}
                     </div>
                   );
                 })}
@@ -802,6 +1066,85 @@ export default function Player() {
             </div>
           )}
         </>
+      )}
+
+      {showCreatePlaylistModal && (
+        <div className="playlist-modal-overlay" onMouseDown={closeCreatePlaylistModal}>
+          <form
+            className="playlist-modal"
+            onMouseDown={(e) => e.stopPropagation()}
+            onSubmit={handleCreatePlaylist}
+          >
+            <h3 className="playlist-modal-title">New playlist</h3>
+            <p className="playlist-modal-sub">
+              <DeviceIcon /> Ye sirf isi device par save hogi — server par nahi jaati.
+            </p>
+            <input
+              type="text"
+              autoFocus
+              className="playlist-modal-input"
+              placeholder="Playlist name&hellip;"
+              value={newPlaylistName}
+              onChange={(e) => setNewPlaylistName(e.target.value)}
+              maxLength={60}
+            />
+            <div className="playlist-modal-actions">
+              <button type="button" className="playlist-modal-btn playlist-modal-btn--ghost" onClick={closeCreatePlaylistModal}>
+                Cancel
+              </button>
+              <button type="submit" className="playlist-modal-btn playlist-modal-btn--primary" disabled={!newPlaylistName.trim()}>
+                Create
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {addToPlaylistTrack && !showCreatePlaylistModal && (
+        <div className="playlist-modal-overlay" onMouseDown={closeAddToPlaylistPicker}>
+          <div className="playlist-modal" onMouseDown={(e) => e.stopPropagation()}>
+            <h3 className="playlist-modal-title">Save to playlist</h3>
+            <p className="playlist-modal-sub line-clamp-2">
+              <DeviceIcon /> &ldquo;{addToPlaylistTrack.title}&rdquo; — locally saved, browser data clear karne par gayab ho jayegi.
+            </p>
+
+            {addToPlaylistFeedback ? (
+              <p className="playlist-modal-feedback">{addToPlaylistFeedback}</p>
+            ) : (
+              <>
+                <div className="playlist-modal-list custom-scrollbar">
+                  {customPlaylists.length === 0 && (
+                    <p className="playlist-modal-empty">No playlists yet — create one below.</p>
+                  )}
+                  {customPlaylists.map((p) => (
+                    <button
+                      key={p.id}
+                      type="button"
+                      className="playlist-modal-item"
+                      onClick={() => handleAddTrackToLocalPlaylist(p.id)}
+                    >
+                      <DeviceIcon />
+                      <span className="line-clamp-2">{p.label}</span>
+                      <span className="playlist-modal-item-count">{p.tracks.length}</span>
+                    </button>
+                  ))}
+                </div>
+                <div className="playlist-modal-actions">
+                  <button type="button" className="playlist-modal-btn playlist-modal-btn--ghost" onClick={closeAddToPlaylistPicker}>
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    className="playlist-modal-btn playlist-modal-btn--primary"
+                    onClick={openCreatePlaylistModal}
+                  >
+                    <PlusIcon /> New playlist
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
       )}
     </div>
   );
