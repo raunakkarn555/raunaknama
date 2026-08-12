@@ -136,8 +136,17 @@ npm run seed
 npm run dev
 ```
 
-Open `http://localhost:5173` — you should see Raunaknama, hear your playlist,
-and see the listener count tick up.
+`npm run dev` runs `netlify dev`, which starts both the Vite frontend and
+the yt-dlp-powered Netlify Functions together and proxies them behind one
+port — this matches production exactly, including the `/api/*` routing.
+
+Open **`http://localhost:8888`** (not 5173 — that's Vite's own port with no
+functions behind it, `/api/*` calls there will fail) — you should see
+Raunaknama, hear your playlist, and see the listener count tick up.
+
+> First run only: `npm install` downloads the yt-dlp binary automatically
+> (see `scripts/download-ytdlp.mjs`). If you ever need to re-fetch it, run
+> `npm run setup:ytdlp`.
 
 ---
 

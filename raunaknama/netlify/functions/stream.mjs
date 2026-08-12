@@ -45,28 +45,41 @@ export const handler = async (event) => {
     videoUrl,
   ];
 
-  const { code, stdoutData, stderrData } = await spawnYtDlp(args);
+  try {
+    const { code, stdoutData, stderrData } = await spawnYtDlp(args);
 
-  if (code !== 0 || !stdoutData.trim()) {
-    console.error(`Error resolving audio URL for track ${id}:`, stderrData);
+    if (code !== 0 || !stdoutData.trim()) {
+      console.error(`Error resolving audio URL for track ${id}:`, stderrData);
+      return {
+        statusCode: 502,
+        headers: { "Content-Type": "application/json", ...CORS_HEADERS },
+        body: JSON.stringify({
+          error: "Failed to extract playable audio stream for this track",
+          details: cookieAwareErrorDetails(stderrData),
+        }),
+      };
+    }
+
+    const directAudioUrl = stdoutData.trim().split("\n")[0];
+
+    // Cache stream URL for 2 hours
+    setCached(streamUrlCache, id, directAudioUrl, STREAM_CACHE_TTL_MS);
+
     return {
-      statusCode: 500,
+      statusCode: 302,
+      headers: { Location: directAudioUrl, ...CORS_HEADERS },
+      body: "",
+    };
+  } catch (err) {
+    // Without this catch, a rejected promise here (e.g. the yt-dlp binary
+    // bootstrap failing) crashes the whole invocation and Netlify returns a
+    // generic HTML error page — which is what broke JSON parsing on the
+    // frontend. Always return real JSON instead.
+    console.error(`Unhandled stream error for track ${id}:`, err);
+    return {
+      statusCode: err.status || 500,
       headers: { "Content-Type": "application/json", ...CORS_HEADERS },
-      body: JSON.stringify({
-        error: "Failed to extract playable audio stream for this track",
-        details: cookieAwareErrorDetails(stderrData),
-      }),
+      body: JSON.stringify({ error: err.message || "Unexpected streaming error" }),
     };
   }
-
-  const directAudioUrl = stdoutData.trim().split("\n")[0];
-
-  // Cache stream URL for 2 hours
-  setCached(streamUrlCache, id, directAudioUrl, STREAM_CACHE_TTL_MS);
-
-  return {
-    statusCode: 302,
-    headers: { Location: directAudioUrl, ...CORS_HEADERS },
-    body: "",
-  };
 };

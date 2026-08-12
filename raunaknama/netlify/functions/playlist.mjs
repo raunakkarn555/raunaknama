@@ -22,7 +22,7 @@ async function fetchPlaylist(selected) {
 
   if (code !== 0) {
     const err = new Error("Failed to fetch playlist metadata");
-    err.status = 500;
+    err.status = 502;
     err.details = cookieAwareErrorDetails(stderrData);
     throw err;
   }

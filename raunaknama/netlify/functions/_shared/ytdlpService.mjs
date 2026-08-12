@@ -1,11 +1,16 @@
 import { spawn } from "child_process";
-import { YtDlp, helpers } from "ytdlp-nodejs";
 import fs from "fs";
 import os from "os";
 import path from "path";
+import https from "https";
 
-const ytdlpClient = new YtDlp();
-let YTDLP_PATH = ytdlpClient.binaryPath;
+// NOTE: this file deliberately does NOT import anything from the
+// `ytdlp-nodejs` package. That package resolves its own binary path using
+// `import.meta.url` at module-load time, which breaks the instant Netlify's
+// function bundler processes it (import.meta.url becomes undefined once
+// bundled, so the package throws on import, before any of our code runs).
+// See scripts/download-ytdlp.mjs for the full explanation and how the
+// binary actually gets onto disk. We just spawn it directly here.
 
 export const PLAYLIST_URL = "https://youtube.com/playlist?list=PLP1mkQtMYc3s";
 
@@ -101,29 +106,140 @@ export function cookieAwareErrorDetails(stderrData) {
 // ---------------------------------------------------------------------------
 // yt-dlp binary bootstrap + spawn helper
 // ---------------------------------------------------------------------------
+// Same platform -> filename map as scripts/download-ytdlp.mjs (kept in sync
+// manually since this file must avoid any extra local imports that could
+// themselves rely on import.meta — see the note at the top of this file).
+const PLATFORM_MAP = {
+  win32: { x64: "yt-dlp.exe", ia32: "yt-dlp_x86.exe", arm64: "yt-dlp_arm64.exe" },
+  linux: { x64: "yt-dlp_linux", arm64: "yt-dlp_linux_aarch64", aarch64: "yt-dlp_linux_aarch64" },
+  darwin: { x64: "yt-dlp_macos", arm64: "yt-dlp_macos" },
+};
+
+function binaryFilename() {
+  const byPlatform = PLATFORM_MAP[process.platform];
+  const filename = byPlatform?.[process.arch];
+  if (!filename) {
+    throw new Error(`No yt-dlp build available for ${process.platform}/${process.arch}`);
+  }
+  return filename;
+}
+
+// scripts/download-ytdlp.mjs (npm postinstall) downloads the binary into
+// <repo>/netlify/functions/_shared/bin/. netlify.toml's `included_files`
+// ships that whole folder with the deployed function. At runtime,
+// process.cwd() for a Netlify Function resolves to the deployed bundle's
+// base directory, which mirrors the repo layout for included files — so a
+// process.cwd()-relative path (never import.meta) is what we use to find it.
+function candidatePaths(filename) {
+  return [
+    path.join(process.cwd(), "netlify", "functions", "_shared", "bin", filename),
+    path.join(process.cwd(), "_shared", "bin", filename), // some bundler layouts flatten this
+    path.join(process.cwd(), "bin", filename),
+  ];
+}
+
+const TMP_YTDLP_PATH = path.join(os.tmpdir(), "yt-dlp_bin");
+
+function findBundledBinary() {
+  let filename;
+  try {
+    filename = binaryFilename();
+  } catch {
+    return null;
+  }
+  for (const candidate of candidatePaths(filename)) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+function downloadToTmp() {
+  return new Promise((resolve, reject) => {
+    let filename;
+    try {
+      filename = binaryFilename();
+    } catch (err) {
+      reject(err);
+      return;
+    }
+    const url = `https://github.com/yt-dlp/yt-dlp/releases/latest/download/${filename}`;
+    const file = fs.createWriteStream(TMP_YTDLP_PATH);
+    const req = https.get(url, { headers: { "User-Agent": "raunaknama-fn" } }, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        file.close();
+        https
+          .get(res.headers.location, { headers: { "User-Agent": "raunaknama-fn" } }, (res2) => {
+            res2.pipe(fs.createWriteStream(TMP_YTDLP_PATH));
+            res2.on("end", () => {
+              fs.chmodSync(TMP_YTDLP_PATH, 0o755);
+              resolve(TMP_YTDLP_PATH);
+            });
+            res2.on("error", reject);
+          })
+          .on("error", reject);
+        return;
+      }
+      if (res.statusCode !== 200) {
+        file.close();
+        reject(new Error(`Download failed: ${res.statusCode} ${res.statusMessage}`));
+        return;
+      }
+      res.pipe(file);
+      file.on("finish", () => {
+        file.close(() => {
+          fs.chmodSync(TMP_YTDLP_PATH, 0o755);
+          resolve(TMP_YTDLP_PATH);
+        });
+      });
+    });
+    req.on("error", reject);
+  });
+}
+
 let ytdlpReadyPromise = null;
 
 async function ensureYtDlp() {
   if (!ytdlpReadyPromise) {
     ytdlpReadyPromise = (async () => {
-      if (!YTDLP_PATH || !fs.existsSync(YTDLP_PATH)) {
-        console.log("yt-dlp binary not found — downloading standard binary...");
-        YTDLP_PATH = await helpers.downloadYtDlp();
-        ytdlpClient.binaryPath = YTDLP_PATH;
-      }
+      // 1. Bundled binary (shipped via netlify.toml's included_files) —
+      //    fastest path, no network I/O at all.
+      const bundled = findBundledBinary();
+      if (bundled) return bundled;
+
+      // 2. Already downloaded to /tmp by a previous invocation on this warm
+      //    container.
+      if (fs.existsSync(TMP_YTDLP_PATH)) return TMP_YTDLP_PATH;
+
+      console.warn(
+        "yt-dlp binary not found at expected path — this usually means " +
+          "`npm install` hasn't finished running scripts/download-ytdlp.mjs, " +
+          "or netlify.toml's `included_files` didn't ship it. Attempting a " +
+          "runtime download to " + os.tmpdir() + " as a fallback (slower " +
+          "first request)."
+      );
 
       try {
-        const result = await ytdlpClient.updateYtDlpAsync();
-        console.log(`yt-dlp self-update status: ${result.version || "ok"}`);
+        return await downloadToTmp();
       } catch (err) {
-        console.warn("yt-dlp self-update failed, using existing binary:", err.message);
+        const bootErr = new Error(
+          "Could not locate or download the yt-dlp binary: " + err.message
+        );
+        bootErr.status = 500;
+        throw bootErr;
       }
-
-      return YTDLP_PATH;
     })();
+    // Don't cache a rejected promise — let the next request retry.
+    ytdlpReadyPromise.catch(() => { ytdlpReadyPromise = null; });
   }
   return ytdlpReadyPromise;
 }
+
+// Hard ceiling on any single yt-dlp invocation. Netlify's default function
+// timeout is short; if yt-dlp hangs (blocked network, bad cookies, etc.) we
+// want to kill it and return a real JSON error well before that, rather
+// than letting Netlify itself kill the function and return an HTML error
+// page.
+const YTDLP_TIMEOUT_MS = 9000;
 
 export function spawnYtDlp(args) {
   return ensureYtDlp().then(
@@ -133,12 +249,35 @@ export function spawnYtDlp(args) {
 
         let stdoutData = "";
         let stderrData = "";
+        let settled = false;
+
+        const timer = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          ytdlp.kill("SIGKILL");
+          resolve({
+            code: 124,
+            stdoutData,
+            stderrData: stderrData + "\n[timed out after " + YTDLP_TIMEOUT_MS + "ms]",
+          });
+        }, YTDLP_TIMEOUT_MS);
 
         ytdlp.stdout.on("data", (chunk) => { stdoutData += chunk; });
         ytdlp.stderr.on("data", (chunk) => { stderrData += chunk.toString(); });
 
-        ytdlp.on("error", reject);
-        ytdlp.on("close", (code) => resolve({ code, stdoutData, stderrData }));
+        ytdlp.on("error", (err) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          reject(err);
+        });
+
+        ytdlp.on("close", (code) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          resolve({ code, stdoutData, stderrData });
+        });
       })
   );
 }

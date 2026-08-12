@@ -33,26 +33,26 @@ export const handler = async (event) => {
     };
   }
 
-  const { code, stdoutData, stderrData } = await spawnYtDlp([
-    "-J",
-    "--flat-playlist",
-    "--no-warnings",
-    ...authArgs(),
-    `ytsearch12:${q}`,
-  ]);
-
-  if (code !== 0) {
-    return {
-      statusCode: 500,
-      headers: { "Content-Type": "application/json", ...CORS_HEADERS },
-      body: JSON.stringify({
-        error: "Failed to search YouTube",
-        details: cookieAwareErrorDetails(stderrData),
-      }),
-    };
-  }
-
   try {
+    const { code, stdoutData, stderrData } = await spawnYtDlp([
+      "-J",
+      "--flat-playlist",
+      "--no-warnings",
+      ...authArgs(),
+      `ytsearch12:${q}`,
+    ]);
+
+    if (code !== 0) {
+      return {
+        statusCode: 502,
+        headers: { "Content-Type": "application/json", ...CORS_HEADERS },
+        body: JSON.stringify({
+          error: "Failed to search YouTube",
+          details: cookieAwareErrorDetails(stderrData),
+        }),
+      };
+    }
+
     const parsed = JSON.parse(stdoutData);
     const results = (parsed.entries || []).map((item) => ({
       id: item.id,
@@ -70,10 +70,15 @@ export const handler = async (event) => {
       body: JSON.stringify(payload),
     };
   } catch (err) {
+    // Covers both JSON.parse failures and any rejection from spawnYtDlp
+    // (e.g. the yt-dlp binary bootstrap failing) — always answer with real
+    // JSON instead of letting Netlify's generic HTML error page leak
+    // through to the frontend.
+    console.error("Search error:", err);
     return {
-      statusCode: 500,
+      statusCode: err.status || 500,
       headers: { "Content-Type": "application/json", ...CORS_HEADERS },
-      body: JSON.stringify({ error: "Failed to parse search response" }),
+      body: JSON.stringify({ error: err.message || "Failed to parse search response" }),
     };
   }
 };

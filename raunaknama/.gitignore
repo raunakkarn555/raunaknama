@@ -4,3 +4,10 @@ dist/
 .env.local
 serviceAccountKey.json
 .DS_Store
+
+# Local Netlify folder
+.netlify
+
+# Downloaded by scripts/download-ytdlp.mjs (npm postinstall) — re-fetched
+# fresh on every `npm install`, no need to commit the binaries themselves.
+netlify/functions/_shared/bin/

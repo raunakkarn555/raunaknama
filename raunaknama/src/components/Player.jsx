@@ -98,7 +98,7 @@ export default function Player() {
   const [error, setError] = useState(null);
 
   const [playlists, setPlaylists] = useState([]);
-  const [activePlaylistId, setActivePlaylistId] = useState(null);
+  const [activePlaylistId, setActivePlaylistId] = useState("default");
 
   const [shuffle, setShuffle] = useState(false);
   const [shuffleOrder, setShuffleOrder] = useState([]);
@@ -120,18 +120,39 @@ export default function Player() {
   const audioRef = useRef(null);
   const consecutiveFailures = useRef(0);
 
-  // 0. Fetch available playlists once
+  // 0. Fetch available playlists once. This runs in parallel with the
+  // playlist-metadata fetch below (which now defaults to "default" instead
+  // of waiting on this to resolve first) — cuts a full network round-trip
+  // off the time-to-first-track.
   useEffect(() => {
     fetch(`${API_BASE}/api/playlists`)
       .then((res) => res.json())
       .then((data) => {
         if (data.playlists && data.playlists.length > 0) {
           setPlaylists(data.playlists);
-          setActivePlaylistId(data.playlists[0].id);
+          setActivePlaylistId((prev) =>
+            data.playlists.some((p) => p.id === prev) ? prev : data.playlists[0].id
+          );
         }
       })
       .catch((err) => console.error("Playlists list fetch error:", err));
   }, []);
+
+  // 0b. Safety net: never let the "Warming up the mic…" state hang forever.
+  // If nothing has resolved after 20s (slow cold start, blocked network,
+  // etc.) surface a real error instead of an infinite spinner.
+  useEffect(() => {
+    if (!loading) return;
+    const timer = setTimeout(() => {
+      setLoading((isStillLoading) => {
+        if (isStillLoading) {
+          setError("This is taking unusually long — the streaming server may be unreachable.");
+        }
+        return false;
+      });
+    }, 20000);
+    return () => clearTimeout(timer);
+  }, [loading, activePlaylistId]);
 
   // 1. Fetch Playlist Metadata
   useEffect(() => {
@@ -190,6 +211,27 @@ export default function Player() {
   const streamUrl = currentTrack
     ? `${API_BASE}/api/stream?id=${currentTrack.id}`
     : "";
+
+  // 2b. Prefetch the next track's stream URL in the background so the
+  // /api/stream yt-dlp resolution (the slowest step in the chain) is
+  // already cached server-side by the time the person hits "next" — makes
+  // skipping feel instant instead of waiting on a fresh yt-dlp call.
+  useEffect(() => {
+    if (!playlist || activeSource !== "playlist" || playlist.tracks.length < 2) return;
+    const nextIdx =
+      shuffle && shuffleOrder.length
+        ? shuffleOrder[(shuffleOrder.indexOf(currentIndex) + 1) % shuffleOrder.length]
+        : (currentIndex + 1) % playlist.tracks.length;
+    const nextTrack = playlist.tracks[nextIdx];
+    if (!nextTrack) return;
+    const controller = new AbortController();
+    fetch(`${API_BASE}/api/stream?id=${nextTrack.id}`, {
+      method: "GET",
+      redirect: "manual", // don't actually follow/download the audio, just warm the cache
+      signal: controller.signal,
+    }).catch(() => {});
+    return () => controller.abort();
+  }, [playlist, currentIndex, shuffle, shuffleOrder, activeSource]);
 
   // 3. Managed Safe Audio Loading without Race Conditions
   useEffect(() => {
