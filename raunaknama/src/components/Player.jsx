@@ -62,6 +62,15 @@ const ShuffleIcon = () => (
   </svg>
 );
 
+const AutoplayIcon = () => (
+  <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M17 2l4 4-4 4" />
+    <path d="M3 11V9a4 4 0 0 1 4-4h14" />
+    <path d="M7 22l-4-4 4-4" />
+    <path d="M21 13v2a4 4 0 0 1-4 4H3" />
+  </svg>
+);
+
 const VolumeIcon = () => (
   <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true">
     <path d="M4 9v6h4l5 5V4L8 9H4zm11.5 3a4.5 4.5 0 0 0-2.3-3.94v7.87A4.5 4.5 0 0 0 15.5 12z" />
@@ -111,6 +120,11 @@ export default function Player() {
   const [shuffle, setShuffle] = useState(false);
   const [shuffleOrder, setShuffleOrder] = useState([]);
 
+  // Autoplay: on by default so a never-ending queue of similar tracks keeps
+  // playing automatically, whether the current track came from a playlist
+  // or from a search pick.
+  const [autoplay, setAutoplay] = useState(true);
+
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState([]);
   const [isSearching, setIsSearching] = useState(false);
@@ -130,6 +144,7 @@ export default function Player() {
   const hlsRef = useRef(null);
   const streamCacheRef = useRef(new Map()); // trackId -> { data: {url,type}, expires }
   const loadTokenRef = useRef(0); // guards against a stale resolve landing after a newer track switch
+  const autoplayHistoryRef = useRef(new Set()); // recently auto-played track ids, so the "similar songs" chain doesn't immediately repeat itself
 
   // 0. Fetch available playlists once. This runs in parallel with the
   // playlist-metadata fetch below (which now defaults to "default" instead
@@ -466,6 +481,61 @@ export default function Player() {
     });
   };
 
+  // Autoplay: when a track that isn't part of a playlist (i.e. one played
+  // via search) finishes, look up tracks similar to it (same channel/title
+  // via the existing search endpoint) and keep the chain going forever,
+  // never repeating a recently-played pick.
+  const playNextAutoplayTrack = () => {
+    const seed = currentTrack;
+    if (!seed) {
+      setIsPlaying(false);
+      return;
+    }
+    const q = seed.channel || seed.title;
+    fetch(`${API_BASE}/api/search?q=${encodeURIComponent(q)}`)
+      .then((res) => res.json())
+      .then((data) => {
+        const candidates = (data.results || []).filter(
+          (t) => t.id !== seed.id && !autoplayHistoryRef.current.has(t.id)
+        );
+        const next = candidates[Math.floor(Math.random() * candidates.length)];
+        if (!next) {
+          setIsPlaying(false);
+          return;
+        }
+        autoplayHistoryRef.current.add(next.id);
+        if (autoplayHistoryRef.current.size > 40) {
+          autoplayHistoryRef.current.clear();
+        }
+        setSearchTrack(next);
+        setActiveSource("search");
+        setIsPlaying(true);
+      })
+      .catch((err) => {
+        console.error("Autoplay similar-track fetch error:", err);
+        setIsPlaying(false);
+      });
+  };
+
+  // Fired when the <audio> element's "ended" event fires. Routes to the
+  // right "next track" behavior depending on where the current track came
+  // from, but only when autoplay is switched on.
+  const handleTrackEnded = () => {
+    if (!autoplay) {
+      setIsPlaying(false);
+      return;
+    }
+    if (activeSource === "search") {
+      playNextAutoplayTrack();
+    } else {
+      handleNext();
+    }
+  };
+
+  const toggleAutoplay = () => {
+    setAutoplay((prev) => !prev);
+  };
+
   const selectPlaylistTrack = (idx) => {
     setActiveSource("playlist");
     setCurrentIndex(idx);
@@ -609,7 +679,7 @@ export default function Player() {
               onPlay={() => setIsPlaying(true)}
               onPlaying={handleAudioPlaying}
               onPause={() => setIsPlaying(false)}
-              onEnded={activeSource === "search" ? () => setIsPlaying(false) : handleNext}
+              onEnded={handleTrackEnded}
               onTimeUpdate={handleTimeUpdate}
               onLoadedMetadata={handleLoadedMetadata}
               onError={handleAudioError}
@@ -660,7 +730,14 @@ export default function Player() {
               <button className="ctrl-btn" onClick={handleNext} aria-label="Next track">
                 <NextIcon />
               </button>
-              <span className="ctrl-spacer" aria-hidden="true" />
+              <button
+                className={`ctrl-btn autoplay-btn ${autoplay ? "is-active" : ""}`}
+                onClick={toggleAutoplay}
+                aria-label="Toggle autoplay"
+                aria-pressed={autoplay}
+              >
+                <AutoplayIcon />
+              </button>
             </div>
 
             <div className="volume-row">

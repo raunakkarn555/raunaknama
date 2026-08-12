@@ -424,6 +424,18 @@ input[type="range"]:focus-visible {
   width: 38px;
 }
 
+.autoplay-btn {
+  width: 38px;
+  height: 38px;
+  color: var(--muted);
+}
+
+.autoplay-btn.is-active {
+  color: var(--stripe-gold);
+  border-color: var(--stripe-gold);
+  box-shadow: 0 0 0 1px rgba(226, 171, 63, 0.3);
+}
+
 .play-btn {
   width: 60px;
   height: 60px;
