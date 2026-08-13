@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="64" y2="64" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#2c1519"/>
+      <stop offset="100%" stop-color="#150a0d"/>
+    </linearGradient>
+    <linearGradient id="ring" x1="0" y1="0" x2="64" y2="64" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#e2ab3f"/>
+      <stop offset="100%" stop-color="#b8333a"/>
+    </linearGradient>
+    <linearGradient id="pole" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#b8333a"/>
+      <stop offset="33%" stop-color="#e2ab3f"/>
+      <stop offset="66%" stop-color="#f4e8d8"/>
+      <stop offset="100%" stop-color="#b8333a"/>
+    </linearGradient>
+    <clipPath id="poleClip">
+      <circle cx="32" cy="32" r="10.5"/>
+    </clipPath>
+  </defs>
+
+  <rect width="64" height="64" rx="15" fill="url(#bg)"/>
+
+  <circle cx="32" cy="32" r="26" fill="none" stroke="url(#ring)" stroke-width="3" opacity="0.9"/>
+
+  <g clip-path="url(#poleClip)">
+    <rect x="21.5" y="21.5" width="21" height="21" fill="url(#pole)"/>
+    <g stroke="#150a0d" stroke-width="5" opacity="0.18">
+      <line x1="10" y1="50" x2="50" y2="10"/>
+      <line x1="18" y1="58" x2="58" y2="18"/>
+      <line x1="2" y1="42" x2="42" y2="2"/>
+    </g>
+  </g>
+  <circle cx="32" cy="32" r="10.5" fill="none" stroke="#f4e8d8" stroke-width="1.4" opacity="0.5"/>
+
+  <circle cx="49" cy="17" r="3.2" fill="#e2ab3f"/>
+</svg>

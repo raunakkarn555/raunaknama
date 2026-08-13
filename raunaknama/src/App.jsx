@@ -3,6 +3,9 @@ import Player from './components/Player';
 import './App.css';
 
 const TOTAL_BG_PHOTOS = 9;
+const TOTAL_BG_PHOTOS_MOBILE = 13;
+// Keep in sync with the `max-width: 640px` breakpoint in App.css.
+const MOBILE_BREAKPOINT_QUERY = '(max-width: 640px)';
 
 const HamburgerIcon = ({ open }) => (
   <svg viewBox="0 0 24 24" width="20" height="20" fill="none" aria-hidden="true">
@@ -66,12 +69,35 @@ function App() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [bgIndex, setBgIndex] = useState(1);
 
+  // Tracks whether we're on a mobile-sized viewport so the backdrop can
+  // switch to the photo set saved in assets/mobile. Desktop/tablet/laptop
+  // keep using the original /bg photos untouched.
+  const [isMobile, setIsMobile] = useState(
+    () => typeof window !== 'undefined' && window.matchMedia(MOBILE_BREAKPOINT_QUERY).matches
+  );
+
+  useEffect(() => {
+    const mql = window.matchMedia(MOBILE_BREAKPOINT_QUERY);
+    const onChange = (e) => setIsMobile(e.matches);
+    mql.addEventListener('change', onChange);
+    return () => mql.removeEventListener('change', onChange);
+  }, []);
+
+  const totalBgPhotos = isMobile ? TOTAL_BG_PHOTOS_MOBILE : TOTAL_BG_PHOTOS;
+
+  // If the viewport crosses the mobile breakpoint (resize, rotate, devtools
+  // toggle), keep bgIndex valid for whichever photo set is now active
+  // instead of pointing past the end of a shorter set.
+  useEffect(() => {
+    setBgIndex((prev) => ((prev - 1) % totalBgPhotos) + 1);
+  }, [totalBgPhotos]);
+
   // Called by Player whenever the currently-playing track changes (new
   // song, next, previous, autoplay chain, etc.) — purely additive, doesn't
   // touch any of Player's own playback logic.
   const advanceBackground = useCallback(() => {
-    setBgIndex((prev) => (prev % TOTAL_BG_PHOTOS) + 1);
-  }, []);
+    setBgIndex((prev) => (prev % totalBgPhotos) + 1);
+  }, [totalBgPhotos]);
 
   const closeMenu = useCallback(() => setMenuOpen(false), []);
 
@@ -93,7 +119,11 @@ function App() {
         <div
           key={bgIndex}
           className="photo-bg-frame"
-          style={{ backgroundImage: `url(/bg/${bgIndex}.jpg)` }}
+          style={{
+            backgroundImage: isMobile
+              ? `url(/bg/mobile/${bgIndex}.jpg)`
+              : `url(/bg/${bgIndex}.jpg)`,
+          }}
         />
         <span className="photo-bg-scrim" />
         <span className="photo-bg-grain" />
@@ -129,9 +159,20 @@ function App() {
         <Player onTrackChange={advanceBackground} menuOpen={menuOpen} onCloseMenu={closeMenu} />
       </main>
 
-      <footer className="foot">
-        <span>90s Bollywood radio, on loop.</span>
-      </footer>
+      <div className="site-footer">
+        <footer className="foot">
+          <span className="foot-tagline">
+            <span aria-hidden="true">🎧</span> 90s Bollywood radio, on loop.
+          </span>
+        </footer>
+
+        <div className="foot-copyright">
+          <span className="foot-credit">
+            Crafted with <span className="foot-heart" aria-hidden="true">❤️</span> by{' '}
+            <span className="foot-credit-name">Raunak</span>
+          </span>
+        </div>
+      </div>
     </div>
   );
 }

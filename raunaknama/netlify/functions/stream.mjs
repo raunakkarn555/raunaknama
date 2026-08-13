@@ -33,7 +33,7 @@ export const handler = async (event) => {
     return { statusCode: 204, headers: CORS_HEADERS, body: "" };
   }
 
-  const { id } = event.queryStringParameters || {};
+  const { id, retry } = event.queryStringParameters || {};
 
   if (!id) {
     return {
@@ -43,8 +43,14 @@ export const handler = async (event) => {
     };
   }
 
-  // Check cache for an already-resolved stream (URL + format type).
-  const cached = getCached(streamUrlCache, id);
+  // A forced retry (frontend calls this after a resolved URL turned out to
+  // be unplayable in the browser — throttled/gated CDN URL, a known
+  // YouTube anti-bot pattern) deliberately skips the cache: the whole point
+  // is to get a different, hopefully-working result instead of the same
+  // broken one.
+  const isRetry = retry === "1";
+
+  const cached = isRetry ? null : getCached(streamUrlCache, id);
   if (cached) {
     return {
       statusCode: 200,
@@ -54,12 +60,18 @@ export const handler = async (event) => {
   }
 
   const videoUrl = `https://www.youtube.com/watch?v=${id}`;
-  console.log(`Extracting audio stream info for track ID: ${id}`);
+  console.log(`Extracting audio stream info for track ID: ${id}${isRetry ? " (forced retry)" : ""}`);
 
   const args = [
     "-f", FORMAT_SELECTOR,
     "-j", // dump-json: gives us both the resolved URL and its protocol/ext
     "--no-warnings",
+    // On a forced retry, ask yt-dlp for a different player client than its
+    // default choice. The default (usually "web") is the one most affected
+    // by YouTube's SABR/PO-token gating, which can produce a URL that
+    // resolves fine server-side but a browser can't actually fetch. "ios"
+    // and "android" clients are far less likely to hand back a gated URL.
+    ...(isRetry ? ["--extractor-args", "youtube:player_client=ios,android"] : []),
     ...authArgs(),
     videoUrl,
   ];

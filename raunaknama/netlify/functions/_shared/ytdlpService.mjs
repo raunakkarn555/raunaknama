@@ -15,16 +15,21 @@ import https from "https";
 export const PLAYLIST_URL = "https://youtube.com/playlist?list=PLP1mkQtMYc3s";
 
 export const PLAYLISTS = [
-  { id: "default", label: "Saloon Classics", url: PLAYLIST_URL },
+  { id: "default", label: "Mohabbatnama", url: "https://youtube.com/playlist?list=PLP1mkQtMYc3s" },
   {
     id: "playlist-2",
-    label: "Retro Rewind",
-    url: "https://youtube.com/playlist?list=PLMRKdK25AuPVjHl9Kdb-gkBy0Cm7Zi2xo",
+    label: "Udasinama",
+    url: "https://youtube.com/playlist?list=PLTBhTUi0uF84",
   },
   {
     id: "playlist-3",
-    label: "Golden Hits",
-    url: "https://youtube.com/playlist?list=PL33748924FF32D510",
+    label: "Mastinama",
+    url: "https://youtube.com/playlist?list=PLXonhj4a9frU",
+  },
+  {
+    id: "playlist-4",
+    label: "Oldnama",
+    url: "https://youtube.com/playlist?list=PLUaT2mpNqhF8",
   },
 ];
 
@@ -71,7 +76,23 @@ const COOKIES_PATH = resolveCookiesPath();
 // list here means we silently fight yt-dlp's own up-to-date defaults instead of
 // benefiting from them. So: let yt-dlp choose.
 export function authArgs() {
-  const args = ["--js-runtimes", "node"];
+  const args = [
+    "--js-runtimes",
+    "node",
+    // Bug fix: without an explicit socket timeout, a stalled/slow TCP
+    // connection to YouTube just sits there until our own 9s JS watchdog
+    // (below) SIGKILLs the whole process — which throws away any partial
+    // progress and always reports the same generic "Failed to extract
+    // playable audio stream" error, with no real reason. Capping yt-dlp's
+    // own per-request socket timeout well under that watchdog means a slow
+    // connection fails *inside* yt-dlp first, with a real, specific stderr
+    // reason (timeout/connection error) that now actually reaches the
+    // frontend via `details` — and a couple of quick automatic retries
+    // often recover it without ever hitting the watchdog at all.
+    "--socket-timeout", "6",
+    "--extractor-retries", "1",
+    "--retries", "1",
+  ];
   if (COOKIES_PATH) {
     args.push("--cookies", COOKIES_PATH);
   }

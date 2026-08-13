@@ -101,6 +101,14 @@ const SearchIcon = () => (
   </svg>
 );
 
+const EqualizerIcon = ({ active }) => (
+  <span className={`eq-icon ${active ? "is-active" : ""}`} aria-hidden="true">
+    <span className="eq-bar" />
+    <span className="eq-bar" />
+    <span className="eq-bar" />
+  </span>
+);
+
 const CloseIcon = () => (
   <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
     <path d="M18 6L6 18M6 6l12 12" />
@@ -219,6 +227,7 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
   const streamCacheRef = useRef(new Map()); // trackId -> { data: {url,type}, expires }
   const loadTokenRef = useRef(0); // guards against a stale resolve landing after a newer track switch
   const autoplayHistoryRef = useRef(new Set()); // recently auto-played track ids, so the "similar songs" chain doesn't immediately repeat itself
+  const retriedTrackIdsRef = useRef(new Set()); // track ids that already got one forced (cache-bypassing) re-resolve after a playback failure
 
   // 0. Fetch available playlists once. This runs in parallel with the
   // playlist-metadata fetch below (which now defaults to "default" instead
@@ -335,12 +344,17 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
   // Resolves a track ID to { url, type: "direct"|"hls" }, via an in-memory
   // client-side cache first (instant, no network at all) and falling back
   // to /api/stream (which has its own server-side cache on top of yt-dlp).
-  const resolveStream = useCallback((trackId) => {
-    const cached = streamCacheRef.current.get(trackId);
-    if (cached && cached.expires > Date.now()) {
-      return Promise.resolve(cached.data);
+  const resolveStream = useCallback((trackId, { forceRefresh = false } = {}) => {
+    if (!forceRefresh) {
+      const cached = streamCacheRef.current.get(trackId);
+      if (cached && cached.expires > Date.now()) {
+        return Promise.resolve(cached.data);
+      }
     }
-    return fetch(`${API_BASE}/api/stream?id=${trackId}`)
+    const streamUrl = forceRefresh
+      ? `${API_BASE}/api/stream?id=${trackId}&retry=1`
+      : `${API_BASE}/api/stream?id=${trackId}`;
+    return fetch(streamUrl)
       .then((res) => {
         if (!res.ok) {
           return res
@@ -368,6 +382,68 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
         return data;
       });
   }, []);
+
+  // Attaches a resolved stream ({ url, type }) to the <audio> element and
+  // starts playback if this is still the current load (guarded by token).
+  // Deliberately NOT wrapped in useCallback: it closes over handleStreamFailure
+  // (defined further below), and being redefined on every render keeps that
+  // closure fresh instead of capturing a stale one. Shared by the normal
+  // track-load effect and by the one-shot forced-retry path in
+  // handleAudioError, so both stay in sync.
+  const attachStreamAndPlay = (data, token, wantsPlay = true) => {
+    const audio = audioRef.current;
+    if (!audio || token !== loadTokenRef.current) return;
+
+    if (hlsRef.current) {
+      hlsRef.current.destroy();
+      hlsRef.current = null;
+    }
+
+    const nativeHlsSupport = audio.canPlayType("application/vnd.apple.mpegurl");
+
+    const playNow = () => {
+      if (!wantsPlay) return;
+      const playPromise = audio.play();
+      if (playPromise !== undefined) {
+        playPromise.catch((err) => {
+          if (err.name !== "AbortError") {
+            console.warn("Playback prevented:", err.message || err);
+            setIsPlaying(false);
+          }
+        });
+      }
+    };
+
+    if (data.type === "hls" && !nativeHlsSupport) {
+      if (!Hls.isSupported()) {
+        setPlaybackError("This browser can't play this track's stream format.");
+        return;
+      }
+      const hls = new Hls({
+        enableWorker: true,
+        maxBufferLength: 30,
+        backBufferLength: 30,
+      });
+      hlsRef.current = hls;
+      hls.on(Hls.Events.ERROR, (_evt, errData) => {
+        if (!errData.fatal || token !== loadTokenRef.current) return;
+        console.warn("HLS fatal error:", errData.type, errData.details);
+        handleStreamFailure();
+      });
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        if (token !== loadTokenRef.current) return;
+        playNow();
+      });
+      hls.loadSource(data.url);
+      hls.attachMedia(audio);
+    } else {
+      // Direct/progressive URL — or a browser (Safari) that plays HLS
+      // natively via the <audio> element, no hls.js needed.
+      audio.src = data.url;
+      audio.load();
+      playNow();
+    }
+  };
 
   // 2b. Prefetch the next track's stream info in the background — both the
   // server-side yt-dlp cache AND our client-side cache get warmed, so by
@@ -413,58 +489,37 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
 
     const wantsPlay = isPlaying;
 
-    const startPlayback = () => {
-      if (!wantsPlay) return;
-      const playPromise = audio.play();
-      if (playPromise !== undefined) {
-        playPromise.catch((err) => {
-          if (err.name !== "AbortError") {
-            console.warn("Playback prevented:", err.message || err);
-            setIsPlaying(false);
-          }
-        });
-      }
-    };
-
     resolveStream(currentTrack.id)
       .then((data) => {
         if (cancelled || token !== loadTokenRef.current) return;
-
-        const nativeHlsSupport = audio.canPlayType("application/vnd.apple.mpegurl");
-
-        if (data.type === "hls" && !nativeHlsSupport) {
-          if (!Hls.isSupported()) {
-            setPlaybackError("This browser can't play this track's stream format.");
-            return;
-          }
-          const hls = new Hls({
-            enableWorker: true,
-            maxBufferLength: 30,
-            backBufferLength: 30,
-          });
-          hlsRef.current = hls;
-          hls.on(Hls.Events.ERROR, (_evt, errData) => {
-            if (!errData.fatal || cancelled || token !== loadTokenRef.current) return;
-            console.warn("HLS fatal error:", errData.type, errData.details);
-            handleStreamFailure();
-          });
-          hls.on(Hls.Events.MANIFEST_PARSED, () => {
-            if (cancelled || token !== loadTokenRef.current) return;
-            startPlayback();
-          });
-          hls.loadSource(data.url);
-          hls.attachMedia(audio);
-        } else {
-          // Direct/progressive URL — or a browser (Safari) that plays HLS
-          // natively via the <audio> element, no hls.js needed.
-          audio.src = data.url;
-          audio.load();
-          startPlayback();
-        }
+        attachStreamAndPlay(data, token, wantsPlay);
       })
       .catch((err) => {
         if (cancelled || token !== loadTokenRef.current) return;
         console.warn("Stream resolve error:", err.message, err.details ? `— ${err.details}` : "");
+
+        // Cookie/bot-check failures are a config problem, not a bad resolve
+        // — every track will fail identically, so retrying wastes a call.
+        // For anything else, try once more with a forced, cache-bypassing
+        // re-resolve (backend uses an alternate extraction client) before
+        // giving up on this track.
+        const isCookieError = err.details && /cookie|sign in to confirm/i.test(err.details);
+        const trackId = currentTrack.id;
+        if (!isCookieError && trackId && !retriedTrackIdsRef.current.has(trackId)) {
+          retriedTrackIdsRef.current.add(trackId);
+          resolveStream(trackId, { forceRefresh: true })
+            .then((data) => {
+              if (cancelled || token !== loadTokenRef.current) return;
+              attachStreamAndPlay(data, token, wantsPlay);
+            })
+            .catch((err2) => {
+              if (cancelled || token !== loadTokenRef.current) return;
+              console.warn("Stream re-resolve also failed:", err2.message);
+              handleStreamFailure(err2.details || err2.message);
+            });
+          return;
+        }
+
         handleStreamFailure(err.details || err.message);
       });
 
@@ -569,6 +624,45 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
   const handleAudioError = () => {
     const mediaError = audioRef.current?.error;
     console.warn("Audio element error:", mediaError?.message || mediaError);
+
+    // A track's stream can resolve successfully server-side but still fail
+    // to actually play in the browser — a throttled/expired CDN URL, or a
+    // format this browser rejects (surfaces as MEDIA_ELEMENT_ERROR: Format
+    // error / "no supported source were found"). Before skipping, try
+    // exactly once more: bypass every cache and ask the backend to
+    // re-resolve using a different extraction client. That alone recovers
+    // a large share of these failures without bothering the listener.
+    const trackId = currentTrack?.id;
+    if (trackId && !retriedTrackIdsRef.current.has(trackId)) {
+      retriedTrackIdsRef.current.add(trackId);
+      const token = ++loadTokenRef.current;
+      resolveStream(trackId, { forceRefresh: true })
+        .then((data) => {
+          if (token !== loadTokenRef.current) return;
+          attachStreamAndPlay(data, token, true);
+        })
+        .catch((err) => {
+          if (token !== loadTokenRef.current) return;
+          // Bug: this used to log only err.message and always hand
+          // handleStreamFailure a hardcoded generic string, discarding
+          // err.details entirely. That meant the *real* reason (a timed-out
+          // yt-dlp call, "Sign in to confirm you're not a bot", etc.) never
+          // reached the console or the UI — every failure looked identical
+          // and got silently skipped, including config problems (missing/
+          // expired cookies) that will fail on every single track and
+          // should stop-and-report instead of skip-and-hide. Mirror the
+          // same details-preserving, cookie-aware handling the primary
+          // resolveStream().catch() above already does.
+          console.warn(
+            "Forced re-resolve after playback failure also failed:",
+            err.message,
+            err.details ? `— ${err.details}` : ""
+          );
+          handleStreamFailure(err.details || err.message);
+        });
+      return;
+    }
+
     handleStreamFailure();
   };
 
@@ -920,7 +1014,7 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
       />
       <aside className={`drawer custom-scrollbar ${menuOpen ? "is-open" : ""}`} aria-hidden={!menuOpen}>
         <div className="drawer-head">
-          <h3 className="drawer-title">Playlists</h3>
+          <h3 className="drawer-title"><span aria-hidden="true">📻</span> Playlists</h3>
           <button type="button" className="drawer-close" onClick={onCloseMenu} aria-label="Close menu">
             <CloseIcon />
           </button>
@@ -942,6 +1036,64 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
                     {p.label}
                   </button>
                 ))}
+              </div>
+            </div>
+          )}
+
+          {playlist && (
+            <div className="drawer-section queue-drawer-section">
+              <button
+                type="button"
+                className="queue-toggle drawer-queue-toggle"
+                onClick={() => setShowQueue((s) => !s)}
+                aria-expanded={showQueue}
+              >
+                <span className="drawer-section-label queue-drawer-label">
+                  <span aria-hidden="true">🎶</span> Now Playing Queue &middot; {playlist.tracks.length} tracks
+                </span>
+                <ChevronIcon open={showQueue} />
+              </button>
+
+              <div className={`queue-list drawer-queue-list custom-scrollbar ${showQueue ? "is-open" : ""}`}>
+                {playlist.tracks.map((track, idx) => {
+                  const isSelected = activeSource === "playlist" && idx === currentIndex;
+                  return (
+                    <div
+                      key={track.id}
+                      onClick={() => selectPlaylistTrack(idx)}
+                      className={`queue-item ${isSelected ? "is-selected" : ""}`}
+                    >
+                      <span className="queue-item-index">
+                        {isSelected ? (isPlaying ? "♪" : "❚❚") : idx + 1}
+                      </span>
+                      <span className="queue-item-title line-clamp-2">{track.title}</span>
+                      {isActivePlaylistLocal ? (
+                        <span
+                          className="queue-item-action"
+                          role="button"
+                          aria-label={`Remove ${track.title} from this playlist`}
+                          title="Remove from this playlist"
+                          onClick={(e) => handleRemoveTrackFromLocalPlaylist(track.id, e)}
+                        >
+                          <TrashIcon />
+                        </span>
+                      ) : (
+                        <span
+                          className="queue-item-action"
+                          role="button"
+                          aria-label={`Save ${track.title} to a playlist`}
+                          title="Save to playlist (on this device)"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            openAddToPlaylistPicker(track);
+                          }}
+                        >
+                          <PlusIcon />
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             </div>
           )}
@@ -1064,29 +1216,40 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
         )}
       </div>
 
-      {loading && (
-        <div className="state-card state-card--inline">
-          <span className="state-disc" aria-hidden="true" />
-          <p className="state-title">Warming up the mic&hellip;</p>
-          <p className="state-sub">Fetching the playlist via yt-dlp.</p>
-        </div>
-      )}
+      {/* ---------- Bottom-docked player bar ----------
+          Everything below (queue, now-playing header, and the transport
+          card) is anchored together as one fixed group at the bottom
+          center of the viewport, so the full-bleed background photo stays
+          visible everywhere above it. Nothing here was removed — the
+          queue simply renders first in this wrapper so it expands
+          upward, above the compact bar, instead of pushing the bar
+          off-screen. */}
+      <div className="player-dock">
+        {loading && (
+          <div className="state-card state-card--inline">
+            <span className="state-disc" aria-hidden="true" />
+            <p className="state-title">Warming up the mic&hellip;</p>
+            <p className="state-sub">Fetching the playlist via yt-dlp.</p>
+          </div>
+        )}
 
-      {!loading && error && (
-        <div className="state-card state-card--error state-card--inline">
-          <p className="state-title state-title--error">Signal lost</p>
-          <p className="state-sub">{error}</p>
-        </div>
-      )}
+        {!loading && error && (
+          <div className="state-card state-card--error state-card--inline">
+            <p className="state-title state-title--error">Signal lost</p>
+            <p className="state-sub">{error}</p>
+          </div>
+        )}
 
-      {!loading && !error && currentTrack && (
-        <>
-          <div className="now-playing-head">
+        {!loading && !error && currentTrack && (
+          <>
+            <div className="now-playing-head">
             <div>
               <span className="eyebrow">
+                <EqualizerIcon active={isPlaying} />
                 {activeSource === "search" ? "Playing from search" : "Now Playing"}
               </span>
               <h2 className="playlist-title">
+                <span aria-hidden="true">🎙️</span>{" "}
                 {activeSource === "search" ? "Custom pick" : playlist?.playlistTitle}
               </h2>
             </div>
@@ -1154,7 +1317,7 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
             />
 
             {playbackError && (
-              <p className="state-sub" role="status" style={{ color: "#f87171", margin: "4px 0 0" }}>
+              <p className="state-sub playback-error-note" role="status">
                 {playbackError}
               </p>
             )}
@@ -1200,65 +1363,9 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
               </button>
             </div>
           </div>
-
-          {playlist && (
-            <div className="queue-section">
-              <button
-                className="queue-toggle"
-                onClick={() => setShowQueue((s) => !s)}
-                aria-expanded={showQueue}
-              >
-                <span>
-                  {showQueue ? "Hide playlist" : "Show playlist"} &middot; {playlist.tracks.length} tracks
-                </span>
-                <ChevronIcon open={showQueue} />
-              </button>
-
-              <div className={`queue-list custom-scrollbar ${showQueue ? "is-open" : ""}`}>
-                {playlist.tracks.map((track, idx) => {
-                  const isSelected = activeSource === "playlist" && idx === currentIndex;
-                  return (
-                    <div
-                      key={track.id}
-                      onClick={() => selectPlaylistTrack(idx)}
-                      className={`queue-item ${isSelected ? "is-selected" : ""}`}
-                    >
-                      <span className="queue-item-index">
-                        {isSelected ? (isPlaying ? "♪" : "❚❚") : idx + 1}
-                      </span>
-                      <span className="queue-item-title line-clamp-2">{track.title}</span>
-                      {isActivePlaylistLocal ? (
-                        <span
-                          className="queue-item-action"
-                          role="button"
-                          aria-label={`Remove ${track.title} from this playlist`}
-                          title="Remove from this playlist"
-                          onClick={(e) => handleRemoveTrackFromLocalPlaylist(track.id, e)}
-                        >
-                          <TrashIcon />
-                        </span>
-                      ) : (
-                        <span
-                          className="queue-item-action"
-                          role="button"
-                          aria-label={`Save ${track.title} to a playlist`}
-                          title="Save to playlist (on this device)"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            openAddToPlaylistPicker(track);
-                          }}
-                        >
-                          <PlusIcon />
-                        </span>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-        </>
-      )}
+          </>
+        )}
+      </div>
 
       {showCreatePlaylistModal && (
         <div className="playlist-modal-overlay" onMouseDown={closeCreatePlaylistModal}>

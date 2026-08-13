@@ -51,9 +51,12 @@
 .photo-bg-scrim {
   position: absolute;
   inset: 0;
+  /* Kept lighter than before so the backdrop photo actually reads through —
+     text elements that sit directly on the photo (now-playing header,
+     footer) carry their own text-shadow for legibility instead. */
   background:
-    radial-gradient(ellipse 90% 60% at 50% 0%, rgba(10, 5, 6, 0.35), transparent 60%),
-    linear-gradient(180deg, rgba(10, 5, 6, 0.55) 0%, rgba(12, 6, 8, 0.72) 45%, rgba(8, 4, 5, 0.92) 100%);
+    radial-gradient(ellipse 90% 60% at 50% 0%, rgba(10, 5, 6, 0.28), transparent 62%),
+    linear-gradient(180deg, rgba(10, 5, 6, 0.4) 0%, rgba(12, 6, 8, 0.52) 45%, rgba(8, 4, 5, 0.72) 100%);
 }
 
 .photo-bg-grain {
@@ -214,11 +217,12 @@
 
 .stage {
   flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  display: block;
   padding: 12px 16px 24px;
   width: 100%;
+  /* Space for the fixed bottom player dock so in-flow content (namely the
+     search bar) never sits underneath it. */
+  padding-bottom: clamp(120px, 22vh, 190px);
 }
 
 .empty-state {
@@ -235,15 +239,21 @@
   border-radius: 4px;
 }
 
+.site-footer {
+  display: flex;
+  flex-direction: column;
+}
+
 .foot {
   display: flex;
-  justify-content: center;
-  gap: 8px;
-  padding: 14px;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  padding: 16px 14px 6px;
+  margin-bottom: clamp(120px, 22vh, 190px);
   font-size: 11.5px;
   color: var(--muted);
   text-align: center;
-  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.6);
 }
 
 .foot a {
@@ -252,6 +262,61 @@
 
 .foot-sep {
   opacity: 0.5;
+}
+
+.foot-tagline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--cream);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-shadow: 0 1px 8px rgba(0, 0, 0, 0.75), 0 1px 3px rgba(0, 0, 0, 0.85);
+}
+
+/* ---------- Copyright / credit bar ----------
+   Sits in normal flow (right under the tagline) on larger screens. On
+   mobile, both the tagline and this credit line detach together as one
+   group and pin to the very bottom edge of the viewport, below the fixed
+   player dock, so neither is ever lost behind the dock or cut off the
+   bottom of a short page. */
+.foot-copyright {
+  display: flex;
+  justify-content: center;
+  padding: 4px 14px 10px;
+  text-align: center;
+}
+
+.foot-credit {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10.5px;
+  letter-spacing: 0.03em;
+  color: var(--muted);
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.75);
+}
+
+.foot-credit-name {
+  color: var(--stripe-gold);
+  font-weight: 700;
+}
+
+.foot-heart {
+  display: inline-block;
+  animation: foot-heartbeat 1.6s ease-in-out infinite;
+}
+
+@keyframes foot-heartbeat {
+  0%, 100% {
+    transform: scale(1);
+  }
+  20% {
+    transform: scale(1.25);
+  }
+  40% {
+    transform: scale(1);
+  }
 }
 
 @keyframes pole-scroll {
@@ -283,6 +348,7 @@
 
   .stage {
     padding: 8px 10px 16px;
+    padding-bottom: clamp(120px, 26vh, 200px);
   }
 
   .listener-pill span:last-child {
@@ -295,6 +361,28 @@
 
   .nav-clock-date {
     display: none;
+  }
+
+  /* Both footer lines (tagline + credit) detach as one group and pin to
+     the very bottom of the screen, below the fixed player dock — this is
+     the bit that was getting lost/clipped on small screens before. */
+  .site-footer {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 30;
+    padding: 8px 16px calc(8px + env(safe-area-inset-bottom));
+    background: linear-gradient(to top, rgba(8, 4, 5, 0.62) 0%, rgba(8, 4, 5, 0.28) 65%, transparent 100%);
+  }
+
+  .site-footer .foot {
+    padding: 0;
+    margin-bottom: 0;
+  }
+
+  .site-footer .foot-copyright {
+    padding: 3px 0 0;
   }
 }
 
@@ -315,6 +403,7 @@
 
   .stage {
     padding: 20px 32px 40px;
+    padding-bottom: clamp(140px, 20vh, 200px);
   }
 }
 
