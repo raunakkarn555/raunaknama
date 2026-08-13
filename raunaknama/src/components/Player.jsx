@@ -9,10 +9,7 @@ import "./Player.css";
 // what makes prev/next feel instant instead of waiting on yt-dlp again.
 const CLIENT_STREAM_CACHE_TTL_MS = 100 * 60 * 1000;
 
-// Since backend functions are hosted on the same Netlify domain under /api/,
-// leaving this as an empty string uses relative paths which automatically 
-// route to your Netlify Functions via netlify.toml.
-const API_BASE = "";
+const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
 
 const formatTime = (secs) => {
   if (!secs || Number.isNaN(secs) || !Number.isFinite(secs)) return "0:00";
@@ -158,6 +155,10 @@ const DeviceIcon = () => (
 );
 
 // --- Local (on-device) custom playlist storage ---
+// These playlists are created by the listener and saved ONLY in this
+// browser's localStorage — never sent to, or fetched from, the server.
+// That means: (a) they're per-device/per-browser, and (b) clearing the
+// browser's site data/cache, or using a different device, wipes them.
 const LOCAL_PLAYLISTS_STORAGE_KEY = "raunaknama_local_playlists_v1";
 
 const loadLocalPlaylists = () => {
@@ -192,6 +193,9 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
   const [shuffle, setShuffle] = useState(false);
   const [shuffleOrder, setShuffleOrder] = useState([]);
 
+  // Autoplay: on by default so a never-ending queue of similar tracks keeps
+  // playing automatically, whether the current track came from a playlist
+  // or from a search pick.
   const [autoplay, setAutoplay] = useState(true);
 
   const [searchQuery, setSearchQuery] = useState("");
@@ -208,25 +212,33 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
 
   const [playbackError, setPlaybackError] = useState(null);
 
+  // Custom playlists that any listener can create — saved only on THIS
+  // device (localStorage), never on the server.
   const [customPlaylists, setCustomPlaylists] = useState(() => loadLocalPlaylists());
   const [showCreatePlaylistModal, setShowCreatePlaylistModal] = useState(false);
   const [newPlaylistName, setNewPlaylistName] = useState("");
-  const [addToPlaylistTrack, setAddToPlaylistTrack] = useState(null);
+  const [addToPlaylistTrack, setAddToPlaylistTrack] = useState(null); // track object currently being saved
   const [addToPlaylistFeedback, setAddToPlaylistFeedback] = useState("");
 
   const audioRef = useRef(null);
-  const importFileInputRef = useRef(null);
+  const importFileInputRef = useRef(null); // hidden <input type="file"> for restoring a local-playlists backup
   const consecutiveFailures = useRef(0);
   const hlsRef = useRef(null);
-  const streamCacheRef = useRef(new Map());
-  const loadTokenRef = useRef(0);
-  const autoplayHistoryRef = useRef(new Set());
-  const retriedTrackIdsRef = useRef(new Set());
+  const streamCacheRef = useRef(new Map()); // trackId -> { data: {url,type}, expires }
+  const loadTokenRef = useRef(0); // guards against a stale resolve landing after a newer track switch
+  const autoplayHistoryRef = useRef(new Set()); // recently auto-played track ids, so the "similar songs" chain doesn't immediately repeat itself
+  const retriedTrackIdsRef = useRef(new Set()); // track ids that already got one forced (cache-bypassing) re-resolve after a playback failure
 
-  // 0. Fetch available playlists once via Netlify proxy (/api/)
+  // 0. Fetch available playlists once. This runs in parallel with the
+  // playlist-metadata fetch below (which now defaults to "default" instead
+  // of waiting on this to resolve first) — cuts a full network round-trip
+  // off the time-to-first-track.
   useEffect(() => {
     fetch(`${API_BASE}/api/playlists`)
-      .then((res) => res.json())
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      })
       .then((data) => {
         if (data.playlists && data.playlists.length > 0) {
           setPlaylists(data.playlists);
@@ -238,7 +250,9 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
       .catch((err) => console.error("Playlists list fetch error:", err));
   }, []);
 
-  // 0b. Safety net for loading state
+  // 0b. Safety net: never let the "Warming up the mic…" state hang forever.
+  // If nothing has resolved after 20s (slow cold start, blocked network,
+  // etc.) surface a real error instead of an infinite spinner.
   useEffect(() => {
     if (!loading) return;
     const timer = setTimeout(() => {
@@ -252,10 +266,13 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
     return () => clearTimeout(timer);
   }, [loading, activePlaylistId]);
 
-  // 1. Fetch Playlist Metadata via Netlify proxy (/api/)
+  // 1. Fetch Playlist Metadata
   useEffect(() => {
     if (!activePlaylistId) return;
 
+    // Local (on-device) custom playlists never touch the network — they're
+    // read straight out of component state, which itself is backed by
+    // this browser's localStorage.
     if (activePlaylistId.startsWith("local:")) {
       const local = customPlaylists.find((p) => p.id === activePlaylistId);
       setPlaylist({
@@ -280,8 +297,19 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
 
     fetch(`${API_BASE}/api/playlist?playlistId=${activePlaylistId}`)
       .then((res) => {
-        if (!res.ok) throw new Error("Failed to load playlist from server");
-        return res.json();
+        // Read the body even on failure — the Netlify function returns a
+        // JSON {error, details} payload explaining exactly why it failed
+        // (e.g. "yt-dlp binary not found" or "YouTube blocked server IP").
+        // Previously this was thrown away, so the console only ever showed
+        // a generic "Failed to load playlist from server" with no way to
+        // diagnose the real cause. Now we surface it.
+        return res.json().then((data) => {
+          if (!res.ok) {
+            const reason = data?.details || data?.error || `HTTP ${res.status}`;
+            throw new Error(reason);
+          }
+          return data;
+        });
       })
       .then((data) => {
         if (data.tracks && data.tracks.length > 0) {
@@ -297,12 +325,12 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
       })
       .catch((err) => {
         console.error("Playlist Fetch Error:", err);
-        setError("Could not connect to streaming server.");
+        setError(`Could not load playlist: ${err.message}`);
         setLoading(false);
       });
   }, [activePlaylistId, customPlaylists]);
 
-  // 2. Search Debounce via Netlify proxy (/api/)
+  // 2. Search Debounce
   useEffect(() => {
     if (!searchQuery.trim()) {
       setSearchResults([]);
@@ -327,6 +355,9 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
   const currentTrack =
     activeSource === "search" ? searchTrack : playlist?.tracks?.[currentIndex];
 
+  // Resolves a track ID to { url, type: "direct"|"hls" }, via an in-memory
+  // client-side cache first (instant, no network at all) and falling back
+  // to /api/stream (which has its own server-side cache on top of yt-dlp).
   const resolveStream = useCallback((trackId, { forceRefresh = false } = {}) => {
     if (!forceRefresh) {
       const cached = streamCacheRef.current.get(trackId);
@@ -344,6 +375,11 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
             .json()
             .catch(() => ({}))
             .then((body) => {
+              // Keep both the short error and the raw yt-dlp details (when
+              // present) so the console shows the *actual* reason a stream
+              // failed to resolve — e.g. "YouTube blocked server IP. Please
+              // set YTDLP_COOKIES_B64..." — instead of a vague generic
+              // message that hides what's actually wrong.
               const err = new Error(body.error || `Stream resolve failed (${res.status})`);
               err.details = body.details;
               throw err;
@@ -361,6 +397,13 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
       });
   }, []);
 
+  // Attaches a resolved stream ({ url, type }) to the <audio> element and
+  // starts playback if this is still the current load (guarded by token).
+  // Deliberately NOT wrapped in useCallback: it closes over handleStreamFailure
+  // (defined further below), and being redefined on every render keeps that
+  // closure fresh instead of capturing a stale one. Shared by the normal
+  // track-load effect and by the one-shot forced-retry path in
+  // handleAudioError, so both stay in sync.
   const attachStreamAndPlay = (data, token, wantsPlay = true) => {
     const audio = audioRef.current;
     if (!audio || token !== loadTokenRef.current) return;
@@ -408,12 +451,18 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
       hls.loadSource(data.url);
       hls.attachMedia(audio);
     } else {
+      // Direct/progressive URL — or a browser (Safari) that plays HLS
+      // natively via the <audio> element, no hls.js needed.
       audio.src = data.url;
       audio.load();
       playNow();
     }
   };
 
+  // 2b. Prefetch the next track's stream info in the background — both the
+  // server-side yt-dlp cache AND our client-side cache get warmed, so by
+  // the time the person hits "next" there's zero yt-dlp wait and zero extra
+  // network round-trip, just an immediate src swap.
   useEffect(() => {
     if (!playlist || activeSource !== "playlist" || playlist.tracks.length < 2) return;
     const nextIdx =
@@ -425,6 +474,11 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
     resolveStream(nextTrack.id).catch(() => {});
   }, [playlist, currentIndex, shuffle, shuffleOrder, activeSource, resolveStream]);
 
+  // 3. Managed Safe Audio Loading without Race Conditions.
+  // Resolves the current track to a real URL + format type, then either:
+  //   - hands the URL straight to the <audio> element (direct/progressive), or
+  //   - spins up hls.js to play an HLS (.m3u8) stream, which plain <audio
+  //     src="..."> cannot do in Chrome/Firefox.
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio) return;
@@ -458,6 +512,11 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
         if (cancelled || token !== loadTokenRef.current) return;
         console.warn("Stream resolve error:", err.message, err.details ? `— ${err.details}` : "");
 
+        // Cookie/bot-check failures are a config problem, not a bad resolve
+        // — every track will fail identically, so retrying wastes a call.
+        // For anything else, try once more with a forced, cache-bypassing
+        // re-resolve (backend uses an alternate extraction client) before
+        // giving up on this track.
         const isCookieError = err.details && /cookie|sign in to confirm/i.test(err.details);
         const trackId = currentTrack.id;
         if (!isCookieError && trackId && !retriedTrackIdsRef.current.has(trackId)) {
@@ -483,6 +542,7 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
     };
   }, [currentTrack?.id, activeSource, resolveStream]);
 
+  // Tear down any live hls.js instance when the component unmounts.
   useEffect(() => {
     return () => {
       if (hlsRef.current) {
@@ -492,12 +552,17 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
     };
   }, []);
 
+  // Purely presentational: let the parent know the playing track changed
+  // (new song, next/prev, autoplay chain, playlist switch, search pick)
+  // so it can swap the full-screen background photo. Doesn't read or
+  // affect any playback state.
   useEffect(() => {
     if (currentTrack?.id && typeof onTrackChange === "function") {
       onTrackChange(currentTrack.id);
     }
   }, [currentTrack?.id, onTrackChange]);
 
+  // 4. Playback Controls
   const handleNext = () => {
     if (!playlist) return;
     setActiveSource("playlist");
@@ -546,6 +611,11 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
   const handleStreamFailure = (message) => {
     setIsPlaying(false);
 
+    // "Sign in to confirm you're not a bot" / cookie-required failures are a
+    // config problem, not a bad track — every track will fail the same way,
+    // so skipping through the whole playlist just burns yt-dlp calls and
+    // buries the real reason under "skipping…" noise. Surface it plainly
+    // and stop, rather than auto-advancing.
     if (message && /cookie|sign in to confirm/i.test(message)) {
       setPlaybackError(message);
       return;
@@ -569,6 +639,13 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
     const mediaError = audioRef.current?.error;
     console.warn("Audio element error:", mediaError?.message || mediaError);
 
+    // A track's stream can resolve successfully server-side but still fail
+    // to actually play in the browser — a throttled/expired CDN URL, or a
+    // format this browser rejects (surfaces as MEDIA_ELEMENT_ERROR: Format
+    // error / "no supported source were found"). Before skipping, try
+    // exactly once more: bypass every cache and ask the backend to
+    // re-resolve using a different extraction client. That alone recovers
+    // a large share of these failures without bothering the listener.
     const trackId = currentTrack?.id;
     if (trackId && !retriedTrackIdsRef.current.has(trackId)) {
       retriedTrackIdsRef.current.add(trackId);
@@ -580,6 +657,16 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
         })
         .catch((err) => {
           if (token !== loadTokenRef.current) return;
+          // Bug: this used to log only err.message and always hand
+          // handleStreamFailure a hardcoded generic string, discarding
+          // err.details entirely. That meant the *real* reason (a timed-out
+          // yt-dlp call, "Sign in to confirm you're not a bot", etc.) never
+          // reached the console or the UI — every failure looked identical
+          // and got silently skipped, including config problems (missing/
+          // expired cookies) that will fail on every single track and
+          // should stop-and-report instead of skip-and-hide. Mirror the
+          // same details-preserving, cookie-aware handling the primary
+          // resolveStream().catch() above already does.
           console.warn(
             "Forced re-resolve after playback failure also failed:",
             err.message,
@@ -609,6 +696,12 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
     });
   };
 
+  // Autoplay: when a track that isn't part of a playlist (i.e. one played
+  // via search) finishes, look up tracks similar to it (same channel/title
+  // via the existing search endpoint) and keep the chain going forever,
+  // never repeating a recently-played pick. Candidates are biased toward
+  // actual songs (query includes "song") and capped at 10 minutes so we
+  // don't autoplay into full mixes, podcasts, or long videos.
   const MAX_AUTOPLAY_DURATION_SECS = 10 * 60;
 
   const playNextAutoplayTrack = () => {
@@ -647,6 +740,14 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
       });
   };
 
+  // Fired when the <audio> element's "ended" event fires. Routes to the
+  // right "next track" behavior depending on where the current track came
+  // from, but only when autoplay is switched on.
+  //
+  // Note: the browser fires "pause" right before "ended", which flips
+  // isPlaying to false via the existing onPause handler. For the playlist
+  // branch we re-assert isPlaying(true) after advancing so the newly loaded
+  // track actually starts playing instead of loading silently.
   const handleTrackEnded = () => {
     if (!autoplay) {
       setIsPlaying(false);
@@ -669,6 +770,12 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
     setIsPlaying(true);
 
     if (idx === currentIndex) {
+      // Same track is already selected (e.g. this is the only song in a
+      // playlist that was just created/added to) — the track-loading
+      // effect keys off currentTrack?.id, so it won't re-fire here and
+      // nothing would actually tell the <audio> element to play, even
+      // though setIsPlaying(true) makes the UI look like it's playing.
+      // Kick playback directly instead.
       const audio = audioRef.current;
       if (audio) {
         const playPromise = audio.play();
@@ -717,6 +824,10 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
     setSearchResults([]);
   };
 
+  // --- Local (on-device) custom playlist handlers ---
+  // Every one of these only ever touches component state + localStorage —
+  // nothing here ever calls the server.
+
   const openCreatePlaylistModal = () => {
     setNewPlaylistName("");
     setShowCreatePlaylistModal(true);
@@ -764,6 +875,9 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
     }
   };
 
+  // Opens the "save this song to a playlist" picker for a given track
+  // (works for search results, the currently-playing track, and tracks
+  // already sitting in a server playlist's queue).
   const openAddToPlaylistPicker = (track) => {
     setAddToPlaylistFeedback("");
     setAddToPlaylistTrack(track);
@@ -802,6 +916,15 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
     persistLocalPlaylists(next);
   };
 
+  // --- Backup (download) and restore (upload) for the on-device custom
+  // playlists ---
+  // These playlists live ONLY in this browser's localStorage (see the note
+  // at the top of the file), so they disappear if the site's cache/data
+  // gets cleared, or simply don't exist on a different device/browser.
+  // These two handlers let the listener download a JSON snapshot of
+  // everything they've saved here, and later load that same file back in
+  // — on this device or any other — to restore it. Like everything else
+  // in this block, neither of these ever talks to the server.
   const handleExportLocalPlaylists = () => {
     try {
       const payload = {
@@ -835,6 +958,7 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
 
   const handleImportLocalPlaylistsFile = (e) => {
     const file = e.target.files && e.target.files[0];
+    // Reset the input so picking the same file again still fires onChange.
     e.target.value = "";
     if (!file) return;
 
@@ -847,6 +971,11 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
           throw new Error("This file doesn't look like a playlists backup.");
         }
 
+        // Merge rather than overwrite: a playlist missing locally (deleted,
+        // or this is a different browser) is restored in full; a playlist
+        // that still exists locally gets the backup's tracks merged in
+        // (de-duplicated by track id) so nothing added since the backup
+        // was taken gets lost.
         const merged = [...customPlaylists];
         let restoredCount = 0;
         incoming.forEach((incomingPlaylist) => {
@@ -891,6 +1020,7 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
 
   return (
     <div className="player-shell">
+      {/* ---------- Hamburger drawer: playlists, custom playlists, backup ---------- */}
       <div
         className={`drawer-overlay ${menuOpen ? "is-open" : ""}`}
         onClick={onCloseMenu}
@@ -1043,6 +1173,7 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
         </div>
       </aside>
 
+      {/* ---------- Search ---------- */}
       <div className="search-wrap">
         <div className={`search-box ${searchFocused ? "is-focused" : ""}`}>
           <SearchIcon />
@@ -1099,6 +1230,14 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
         )}
       </div>
 
+      {/* ---------- Bottom-docked player bar ----------
+          Everything below (queue, now-playing header, and the transport
+          card) is anchored together as one fixed group at the bottom
+          center of the viewport, so the full-bleed background photo stays
+          visible everywhere above it. Nothing here was removed — the
+          queue simply renders first in this wrapper so it expands
+          upward, above the compact bar, instead of pushing the bar
+          off-screen. */}
       <div className="player-dock">
         {loading && (
           <div className="state-card state-card--inline">
