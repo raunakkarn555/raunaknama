@@ -14,24 +14,7 @@
   # function would then try to re-download it into the (read-only)
   # deployment folder at runtime and crash. This makes sure it ships with
   # the function.
-  #
-  # IMPORTANT: only ship the Linux binary here, never the whole bin/**
-  # folder. Netlify Functions always run on Linux (AWS Lambda), so
-  # yt-dlp.exe / yt-dlp_x86.exe / yt-dlp_arm64.exe (Windows) and any
-  # macOS binary that a contributor's local `npm install` also downloaded
-  # into that same folder (see PLATFORM_MAP in scripts/download-ytdlp.mjs)
-  # are 100% dead weight in production. Globbing the whole folder with
-  # `bin/**` was pulling yt-dlp.exe (~18MB) in alongside yt-dlp_linux
-  # (~40MB), pushing the zipped function bundle to ~58MB — over AWS
-  # Lambda's hard 50MB zipped deployment package limit. That deploy
-  # failure is silent from the site's perspective (the static site and
-  # other functions still deploy fine) but this function's endpoint then
-  # 500s in production while working perfectly under `netlify dev`
-  # locally, because a local dev server has no such size limit. Verified
-  # locally with @netlify/zip-it-and-ship-it (the same bundler Netlify's
-  # build uses): bin/** => 57.8MB zip (over the limit); yt-dlp_linux
-  # alone => 39.8MB zip (safely under it).
-  included_files = ["netlify/functions/_shared/bin/yt-dlp_linux"]
+  included_files = ["netlify/functions/_shared/bin/**"]
 
 # `netlify dev` runs this as a subprocess and proxies both the Vite dev
 # server AND the Netlify Functions dev server behind one port (8888) so that

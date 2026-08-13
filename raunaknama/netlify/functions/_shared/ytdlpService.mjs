@@ -3,7 +3,6 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import https from "https";
-import zlib from "zlib";
 
 // NOTE: this file deliberately does NOT import anything from the
 // `ytdlp-nodejs` package. That package resolves its own binary path using
@@ -46,19 +45,10 @@ function resolveCookiesPath() {
 
   if (process.env.YTDLP_COOKIES_B64) {
     try {
-      const raw = Buffer.from(process.env.YTDLP_COOKIES_B64, "base64");
-      // Netlify env var values are capped at 5000 characters, and a
-      // browser's *entire* cookies.txt export (every site you've ever
-      // visited, not just YouTube) is almost always bigger than that once
-      // base64-inflated. So this value may be gzip-compressed to fit —
-      // gzip magic bytes are 0x1f 0x8b. Fall back to treating it as plain
-      // text for anyone who base64'd an already-small/pre-filtered file
-      // directly (still supported, just not required).
-      const isGzip = raw.length > 2 && raw[0] === 0x1f && raw[1] === 0x8b;
-      const decoded = isGzip ? zlib.gunzipSync(raw).toString("utf8") : raw.toString("utf8");
+      const decoded = Buffer.from(process.env.YTDLP_COOKIES_B64, "base64").toString("utf8");
       const tmpPath = path.join(os.tmpdir(), "yt-cookies.txt");
       fs.writeFileSync(tmpPath, decoded, "utf8");
-      console.log(`Loaded YouTube cookies from YTDLP_COOKIES_B64${isGzip ? " (gzip)" : ""}`);
+      console.log("Loaded YouTube cookies from YTDLP_COOKIES_B64");
       return tmpPath;
     } catch (err) {
       console.error("Failed to decode YTDLP_COOKIES_B64:", err.message);
@@ -163,21 +153,7 @@ function findBundledBinary() {
     return null;
   }
   for (const candidate of candidatePaths(filename)) {
-    if (fs.existsSync(candidate)) {
-      // The binary can reach disk with the executable bit stripped —
-      // e.g. zipped/unzipped on Windows, or copied by a tool that doesn't
-      // preserve unix file modes (git normally preserves it, but not every
-      // path here does). spawn() fails with EACCES if this bit is missing,
-      // which otherwise looks identical to "binary not found" from the
-      // caller's perspective. Always force it back on before use. This is
-      // a no-op (cheap stat+chmod) on every request once it's already 755.
-      try {
-        fs.chmodSync(candidate, 0o755);
-      } catch (err) {
-        console.warn(`Could not chmod ${candidate}: ${err.message}`);
-      }
-      return candidate;
-    }
+    if (fs.existsSync(candidate)) return candidate;
   }
   return null;
 }
@@ -223,7 +199,7 @@ function downloadToTmp() {
     });
     req.on("error", reject);
   });
-} 
+}
 
 let ytdlpReadyPromise = null;
 

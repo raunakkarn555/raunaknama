@@ -11,31 +11,6 @@ const CLIENT_STREAM_CACHE_TTL_MS = 100 * 60 * 1000;
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
 
-// Wraps fetch() so that a raw network-level failure (TypeError: Failed to
-// fetch — DNS/connection refused/CORS/blocked-by-extension, i.e. the
-// request never got a response at all) is reported distinctly from a real
-// server-side error (4xx/5xx, which DOES get a response). In production
-// this is almost always caused by the Netlify Functions not being deployed
-// at all (wrong base directory / drag-and-drop deploy instead of a
-// git-connected build) rather than a bug in the function itself — so
-// surfacing which case we're in makes that immediately obvious in the
-// console instead of a generic "Failed to fetch" that could mean anything.
-function describeFetchFailure(err, url) {
-  if (err instanceof TypeError) {
-    return (
-      `Network-level failure calling ${url} — the request never reached ` +
-      `the server. On Netlify this almost always means the serverless ` +
-      `function isn't deployed (check the Functions tab in the Netlify ` +
-      `dashboard — if it's empty, the site was likely deployed without ` +
-      `running the build, e.g. via drag-and-drop of the dist folder, or ` +
-      `the repo's base directory isn't pointed at the folder containing ` +
-      `netlify.toml). It can also be a browser extension blocking the ` +
-      `request — try Incognito with extensions off to rule that out.`
-    );
-  }
-  return err.message;
-}
-
 const formatTime = (secs) => {
   if (!secs || Number.isNaN(secs) || !Number.isFinite(secs)) return "0:00";
   const m = Math.floor(secs / 60);
@@ -197,7 +172,7 @@ const persistLocalPlaylists = (list) => {
   }
 };
 
-export default function Player() {
+export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
   const [playlist, setPlaylist] = useState(null);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -250,12 +225,8 @@ export default function Player() {
   // of waiting on this to resolve first) — cuts a full network round-trip
   // off the time-to-first-track.
   useEffect(() => {
-    const url = `${API_BASE}/api/playlists`;
-    fetch(url)
-      .then((res) => {
-        if (!res.ok) throw new Error(`/api/playlists returned ${res.status}`);
-        return res.json();
-      })
+    fetch(`${API_BASE}/api/playlists`)
+      .then((res) => res.json())
       .then((data) => {
         if (data.playlists && data.playlists.length > 0) {
           setPlaylists(data.playlists);
@@ -264,7 +235,7 @@ export default function Player() {
           );
         }
       })
-      .catch((err) => console.error("Playlists list fetch error:", describeFetchFailure(err, url)));
+      .catch((err) => console.error("Playlists list fetch error:", err));
   }, []);
 
   // 0b. Safety net: never let the "Warming up the mic…" state hang forever.
@@ -312,10 +283,9 @@ export default function Player() {
     setLoading(true);
     setError(null);
 
-    const url = `${API_BASE}/api/playlist?playlistId=${activePlaylistId}`;
-    fetch(url)
+    fetch(`${API_BASE}/api/playlist?playlistId=${activePlaylistId}`)
       .then((res) => {
-        if (!res.ok) throw new Error(`Failed to load playlist from server (status ${res.status})`);
+        if (!res.ok) throw new Error("Failed to load playlist from server");
         return res.json();
       })
       .then((data) => {
@@ -331,12 +301,8 @@ export default function Player() {
         setLoading(false);
       })
       .catch((err) => {
-        console.error("Playlist Fetch Error:", describeFetchFailure(err, url));
-        setError(
-          err instanceof TypeError
-            ? "Could not reach the streaming server (network error) — see console for details."
-            : "Could not connect to streaming server."
-        );
+        console.error("Playlist Fetch Error:", err);
+        setError("Could not connect to streaming server.");
         setLoading(false);
       });
   }, [activePlaylistId, customPlaylists]);
@@ -516,6 +482,16 @@ export default function Player() {
       }
     };
   }, []);
+
+  // Purely presentational: let the parent know the playing track changed
+  // (new song, next/prev, autoplay chain, playlist switch, search pick)
+  // so it can swap the full-screen background photo. Doesn't read or
+  // affect any playback state.
+  useEffect(() => {
+    if (currentTrack?.id && typeof onTrackChange === "function") {
+      onTrackChange(currentTrack.id);
+    }
+  }, [currentTrack?.id, onTrackChange]);
 
   // 4. Playback Controls
   const handleNext = () => {
@@ -935,81 +911,103 @@ export default function Player() {
   const showResultsDropdown = searchFocused && (searchQuery.trim().length > 0);
 
   return (
-    <div className="player-card">
-      {playlists.length > 0 && (
-        <div className="playlist-tabs" role="tablist" aria-label="Choose a playlist">
-          {playlists.map((p) => (
-            <button
-              key={p.id}
-              role="tab"
-              aria-selected={p.id === activePlaylistId}
-              className={`playlist-tab ${p.id === activePlaylistId ? "is-active" : ""}`}
-              onClick={() => setActivePlaylistId(p.id)}
-            >
-              {p.label}
-            </button>
-          ))}
+    <div className="player-shell">
+      {/* ---------- Hamburger drawer: playlists, custom playlists, backup ---------- */}
+      <div
+        className={`drawer-overlay ${menuOpen ? "is-open" : ""}`}
+        onClick={onCloseMenu}
+        aria-hidden="true"
+      />
+      <aside className={`drawer custom-scrollbar ${menuOpen ? "is-open" : ""}`} aria-hidden={!menuOpen}>
+        <div className="drawer-head">
+          <h3 className="drawer-title">Playlists</h3>
+          <button type="button" className="drawer-close" onClick={onCloseMenu} aria-label="Close menu">
+            <CloseIcon />
+          </button>
         </div>
-      )}
 
-      <div className="local-playlists-block">
-        <div className="playlist-tabs local-playlists-tabs" role="tablist" aria-label="Your custom playlists">
-          {customPlaylists.map((p) => (
-            <button
-              key={p.id}
-              role="tab"
-              aria-selected={p.id === activePlaylistId}
-              className={`playlist-tab is-local ${p.id === activePlaylistId ? "is-active" : ""}`}
-              onClick={() => setActivePlaylistId(p.id)}
-            >
-              <DeviceIcon />
-              <span>{p.label}</span>
-              <span
-                className="playlist-tab-delete"
-                role="button"
-                aria-label={`Delete playlist ${p.label}`}
-                onClick={(e) => handleDeleteLocalPlaylist(p.id, e)}
+        <div className="drawer-body">
+          {playlists.length > 0 && (
+            <div className="drawer-section">
+              <p className="drawer-section-label">Radio playlists</p>
+              <div className="playlist-tabs" role="tablist" aria-label="Choose a playlist">
+                {playlists.map((p) => (
+                  <button
+                    key={p.id}
+                    role="tab"
+                    aria-selected={p.id === activePlaylistId}
+                    className={`playlist-tab ${p.id === activePlaylistId ? "is-active" : ""}`}
+                    onClick={() => setActivePlaylistId(p.id)}
+                  >
+                    {p.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="drawer-section local-playlists-block">
+            <p className="drawer-section-label">Your playlists</p>
+            <div className="playlist-tabs local-playlists-tabs" role="tablist" aria-label="Your custom playlists">
+              {customPlaylists.map((p) => (
+                <button
+                  key={p.id}
+                  role="tab"
+                  aria-selected={p.id === activePlaylistId}
+                  className={`playlist-tab is-local ${p.id === activePlaylistId ? "is-active" : ""}`}
+                  onClick={() => setActivePlaylistId(p.id)}
+                >
+                  <DeviceIcon />
+                  <span>{p.label}</span>
+                  <span
+                    className="playlist-tab-delete"
+                    role="button"
+                    aria-label={`Delete playlist ${p.label}`}
+                    onClick={(e) => handleDeleteLocalPlaylist(p.id, e)}
+                  >
+                    <TrashIcon />
+                  </span>
+                </button>
+              ))}
+              <button className="playlist-tab playlist-tab--create" onClick={openCreatePlaylistModal}>
+                <PlusIcon />
+                <span>New playlist</span>
+              </button>
+            </div>
+            <p className="local-playlists-note">
+              <DeviceIcon /> Ye custom playlists sirf isi device/browser par locally save hoti hain, server par nahi — cache ya browser data clear karne par ye gayab ho jayengi.
+            </p>
+
+            <div className="local-playlists-backup-actions">
+              <button
+                type="button"
+                className="playlist-modal-btn playlist-modal-btn--ghost local-playlists-backup-btn"
+                onClick={handleExportLocalPlaylists}
+                title="Download all your on-device playlists as a JSON backup file"
               >
-                <TrashIcon />
-              </span>
-            </button>
-          ))}
-          <button className="playlist-tab playlist-tab--create" onClick={openCreatePlaylistModal}>
-            <PlusIcon />
-            <span>New playlist</span>
-          </button>
+                <SaveIcon /> Download backup
+              </button>
+              <button
+                type="button"
+                className="playlist-modal-btn playlist-modal-btn--ghost local-playlists-backup-btn"
+                onClick={triggerImportLocalPlaylists}
+                title="Restore playlists from a previously downloaded backup file"
+              >
+                <UploadIcon /> Upload backup
+              </button>
+              <input
+                ref={importFileInputRef}
+                type="file"
+                accept="application/json,.json"
+                onChange={handleImportLocalPlaylistsFile}
+                style={{ display: "none" }}
+              />
+            </div>
+          </div>
         </div>
-        <p className="local-playlists-note">
-          <DeviceIcon /> Ye custom playlists sirf isi device/browser par locally save hoti hain, server par nahi — cache ya browser data clear karne par ye gayab ho jayengi.
-        </p>
+      </aside>
 
-        <div className="local-playlists-backup-actions">
-          <button
-            type="button"
-            className="playlist-modal-btn playlist-modal-btn--ghost local-playlists-backup-btn"
-            onClick={handleExportLocalPlaylists}
-            title="Download all your on-device playlists as a JSON backup file"
-          >
-            <SaveIcon /> Download backup
-          </button>
-          <button
-            type="button"
-            className="playlist-modal-btn playlist-modal-btn--ghost local-playlists-backup-btn"
-            onClick={triggerImportLocalPlaylists}
-            title="Restore playlists from a previously downloaded backup file"
-          >
-            <UploadIcon /> Upload backup
-          </button>
-          <input
-            ref={importFileInputRef}
-            type="file"
-            accept="application/json,.json"
-            onChange={handleImportLocalPlaylistsFile}
-            style={{ display: "none" }}
-          />
-        </div>
-      </div>
-
+      {/* ---------- Search ---------- */}
       <div className="search-wrap">
         <div className={`search-box ${searchFocused ? "is-focused" : ""}`}>
           <SearchIcon />
@@ -1083,7 +1081,7 @@ export default function Player() {
 
       {!loading && !error && currentTrack && (
         <>
-          <div className="player-card-header">
+          <div className="now-playing-head">
             <div>
               <span className="eyebrow">
                 {activeSource === "search" ? "Playing from search" : "Now Playing"}
@@ -1103,9 +1101,35 @@ export default function Player() {
             </button>
           </div>
 
-          <div className="stage-main">
-            <div className={`disc ${isPlaying ? "is-spinning" : ""}`} aria-hidden="true">
-              <div className="disc-hole" />
+          <div className="orb-stage">
+            <div className="orb-row">
+              <div className={`player-orb ${isPlaying ? "is-spinning" : ""}`} aria-hidden="true">
+                <span className={`orb-ring ${isPlaying ? "is-active" : ""}`} />
+                <span className={`orb-ring orb-ring--runner ${isPlaying ? "is-active" : ""}`} />
+                <button
+                  type="button"
+                  className="orb-play-btn"
+                  onClick={togglePlayPause}
+                  aria-label={isPlaying ? "Pause" : "Play"}
+                >
+                  {isPlaying ? <PauseIcon /> : <PlayIcon />}
+                </button>
+              </div>
+
+              <div className="volume-vertical">
+                <input
+                  type="range"
+                  className="volume-bar volume-bar--vertical"
+                  min="0"
+                  max="1"
+                  step="0.01"
+                  value={volume}
+                  onChange={handleVolumeChange}
+                  aria-label="Volume"
+                  aria-orientation="vertical"
+                />
+                <VolumeIcon />
+              </div>
             </div>
 
             <div className="track-info">
@@ -1163,13 +1187,6 @@ export default function Player() {
               <button className="ctrl-btn" onClick={handlePrev} aria-label="Previous track">
                 <PrevIcon />
               </button>
-              <button
-                className="ctrl-btn play-btn"
-                onClick={togglePlayPause}
-                aria-label={isPlaying ? "Pause" : "Play"}
-              >
-                {isPlaying ? <PauseIcon /> : <PlayIcon />}
-              </button>
               <button className="ctrl-btn" onClick={handleNext} aria-label="Next track">
                 <NextIcon />
               </button>
@@ -1181,20 +1198,6 @@ export default function Player() {
               >
                 <AutoplayIcon />
               </button>
-            </div>
-
-            <div className="volume-row">
-              <VolumeIcon />
-              <input
-                type="range"
-                className="volume-bar"
-                min="0"
-                max="1"
-                step="0.01"
-                value={volume}
-                onChange={handleVolumeChange}
-                aria-label="Volume"
-              />
             </div>
           </div>
 
@@ -1338,4 +1341,3 @@ export default function Player() {
     </div>
   );
 }
-

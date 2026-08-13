@@ -82,19 +82,6 @@ async function main() {
   for (const filename of targets) {
     const dest = path.join(BIN_DIR, filename);
     if (fs.existsSync(dest)) {
-      // Re-assert the executable bit even on an already-present file. If
-      // this binary reached disk via a zip/copy that didn't preserve unix
-      // permissions (common on Windows), it can exist but not be
-      // executable — and because it "already exists", this branch used to
-      // skip straight past the chmod that only ran after a fresh
-      // download, silently shipping a non-executable binary.
-      if (!filename.endsWith(".exe")) {
-        try {
-          fs.chmodSync(dest, 0o755);
-        } catch (err) {
-          console.warn(`[yt-dlp setup] could not chmod existing ${filename}: ${err.message}`);
-        }
-      }
       console.log(`[yt-dlp setup] already present: ${filename}`);
       continue;
     }
