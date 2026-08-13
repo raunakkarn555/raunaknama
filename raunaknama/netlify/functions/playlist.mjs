@@ -16,6 +16,11 @@ async function fetchPlaylist(selected) {
   const { code, stdoutData, stderrData } = await spawnYtDlp([
     "-J",
     "--flat-playlist",
+    // Without this, yt-dlp can print warning text (e.g. about a fallback
+    // extractor client) into the same stdout stream we JSON.parse below,
+    // corrupting it — this is what search.mjs already does, playlist.mjs
+    // just didn't match it.
+    "--no-warnings",
     ...authArgs(),
     selected.url,
   ]);
@@ -45,8 +50,21 @@ async function fetchPlaylist(selected) {
     setCached(playlistCache, selected.id, payload);
     return payload;
   } catch (err) {
+    // stdoutData exited with code 0 but wasn't valid JSON — log the raw
+    // output server-side (visible in Netlify's function logs) and also
+    // return a snippet in `details` so the frontend can surface it,
+    // instead of swallowing the one piece of information that actually
+    // explains what went wrong.
+    console.error("[playlist] yt-dlp exited 0 but stdout wasn't valid JSON.");
+    console.error("[playlist] stdout (first 1000 chars):", stdoutData.slice(0, 1000));
+    if (stderrData) console.error("[playlist] stderr (first 1000 chars):", stderrData.slice(0, 1000));
+
     const parseErr = new Error("Failed to parse playlist response");
     parseErr.status = 500;
+    const snippet = (stdoutData || "").trim().slice(0, 300);
+    parseErr.details = snippet
+      ? `yt-dlp returned non-JSON output: "${snippet}"`
+      : "yt-dlp exited successfully but returned empty output.";
     throw parseErr;
   }
 }
