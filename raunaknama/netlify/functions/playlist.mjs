@@ -15,11 +15,15 @@ async function fetchPlaylist(selected) {
   const parsed = await spawnYtDlpJsonWithRetry([
     "-J",
     "--flat-playlist",
-    // Without this, yt-dlp can print warning text (e.g. about a fallback
-    // extractor client) into the same stdout stream we JSON.parse below,
-    // corrupting it — this is what search.mjs already does, playlist.mjs
-    // just didn't match it.
-    "--no-warnings",
+    // BUG FIX: `--no-warnings` was previously set here on the (incorrect)
+    // assumption that yt-dlp's warning text could leak into the same
+    // stdout stream we JSON.parse below. It doesn't — yt-dlp writes
+    // WARNING/ERROR lines to stderr, which spawnYtDlp already captures
+    // separately from stdout. Suppressing warnings just threw away the
+    // one piece of diagnostic text (e.g. "Sign in to confirm you're not a
+    // bot", PO-token/player-client fallback notices) that explains *why*
+    // a request came back empty, which is exactly what produced the
+    // unhelpful generic "no output and no error" message.
     ...authArgs(),
     selected.url,
   ]);

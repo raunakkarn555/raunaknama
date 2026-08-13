@@ -36,7 +36,9 @@ export const handler = async (event) => {
     const parsed = await spawnYtDlpJsonWithRetry([
       "-J",
       "--flat-playlist",
-      "--no-warnings",
+      // BUG FIX: see the matching note in playlist.mjs — warnings go to
+      // stderr, not stdout, so `--no-warnings` was only hiding the real
+      // diagnostic text, not protecting the JSON parse.
       ...authArgs(),
       `ytsearch12:${q}`,
     ]);

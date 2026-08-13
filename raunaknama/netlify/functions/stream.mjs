@@ -65,7 +65,10 @@ export const handler = async (event) => {
   const args = [
     "-f", FORMAT_SELECTOR,
     "-j", // dump-json: gives us both the resolved URL and its protocol/ext
-    "--no-warnings",
+    // BUG FIX: dropped `--no-warnings` here too — it only suppresses
+    // stderr text (warnings never touch stdout), and this path already
+    // logs stderrData verbatim via console.error below, so keeping
+    // warnings in gives real diagnostic info instead of silence.
     // On a forced retry, ask yt-dlp for a different player client than its
     // default choice. The default (usually "web") is the one most affected
     // by YouTube's SABR/PO-token gating, which can produce a URL that

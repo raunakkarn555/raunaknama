@@ -369,6 +369,16 @@ export async function spawnYtDlpJsonWithRetry(args, { attempts = 2, delayMs = 30
     const { code, stdoutData, stderrData } = await spawnYtDlp(args);
     const isLastAttempt = attempt === attempts;
 
+    // BUG FIX: previously nothing logged the raw yt-dlp output before
+    // throwing, so even checking Netlify's function logs gave you nothing
+    // to diagnose a failure from — only the generic message the frontend
+    // saw. Always log what actually happened server-side.
+    console.log(
+      `[ytdlp] attempt ${attempt}/${attempts} args=${JSON.stringify(args)} ` +
+        `code=${code} stdoutBytes=${stdoutData.length} stderrBytes=${stderrData.length}`
+    );
+    if (stderrData) console.log(`[ytdlp] stderr: ${stderrData}`);
+
     if (code !== 0) {
       lastErr = new Error("yt-dlp exited with a non-zero status");
       lastErr.status = 502;
@@ -386,9 +396,13 @@ export async function spawnYtDlpJsonWithRetry(args, { attempts = 2, delayMs = 30
       lastErr.status = 502;
       lastErr.details = stderrData
         ? cookieAwareErrorDetails(stderrData)
-        : "No output and no error from yt-dlp — most likely transient YouTube " +
-          "playlist-extraction flakiness (a known upstream yt-dlp issue), not " +
-          "a problem with this app. Please try again.";
+        : "yt-dlp produced no stdout and no stderr. This almost always means " +
+          "requests from this server are being silently blocked/challenged by " +
+          "YouTube (very common for Netlify's shared datacenter IPs) rather than " +
+          "a transient glitch. Set YTDLP_COOKIES_B64 (or YTDLP_COOKIES_PATH) in " +
+          "your Netlify environment variables with a logged-in account's " +
+          "cookies.txt — check the Netlify function logs for this invocation " +
+          "for the exact yt-dlp command/exit code that produced this.";
       if (!isLastAttempt) {
         console.warn(`[ytdlp] attempt ${attempt}/${attempts} returned empty output, retrying...`);
         await sleep(delayMs);
