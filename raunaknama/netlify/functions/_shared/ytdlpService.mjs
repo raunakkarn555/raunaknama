@@ -174,7 +174,22 @@ function findBundledBinary() {
     return null;
   }
   for (const candidate of candidatePaths(filename)) {
-    if (fs.existsSync(candidate)) return candidate;
+    if (fs.existsSync(candidate)) {
+      // BUG FIX: zip/tar/some CI artifact pipelines (and some git checkouts
+      // on Windows) don't preserve the executable bit, so a binary that was
+      // `chmod 755`'d when it was downloaded can silently arrive on disk as
+      // non-executable (e.g. 644). When that happens, spawn() below doesn't
+      // fail loudly with "yt-dlp not found" — Node throws EACCES from the
+      // 'error' event, which upstream code was treating as a generic
+      // failure. Rather than trust the bit is already right, force it on
+      // every resolution. chmod is a cheap syscall and safe to repeat.
+      try {
+        fs.chmodSync(candidate, 0o755);
+      } catch (err) {
+        console.warn(`[ytdlp] could not chmod ${candidate}: ${err.message}`);
+      }
+      return candidate;
+    }
   }
   return null;
 }
@@ -234,7 +249,14 @@ async function ensureYtDlp() {
 
       // 2. Already downloaded to /tmp by a previous invocation on this warm
       //    container.
-      if (fs.existsSync(TMP_YTDLP_PATH)) return TMP_YTDLP_PATH;
+      if (fs.existsSync(TMP_YTDLP_PATH)) {
+        try {
+          fs.chmodSync(TMP_YTDLP_PATH, 0o755);
+        } catch (err) {
+          console.warn(`[ytdlp] could not chmod ${TMP_YTDLP_PATH}: ${err.message}`);
+        }
+        return TMP_YTDLP_PATH;
+      }
 
       console.warn(
         "yt-dlp binary not found at expected path — this usually means " +
@@ -295,7 +317,20 @@ export function spawnYtDlp(args) {
           if (settled) return;
           settled = true;
           clearTimeout(timer);
-          reject(err);
+          // BUG FIX: a spawn-level failure (binary missing, not executable,
+          // wrong architecture, etc.) used to reject with Node's raw
+          // "spawn ... EACCES/ENOENT" error, which callers surfaced verbatim
+          // — confusing, and easy to mistake for a YouTube/network problem.
+          // Attach a clear status + message so it reads the same way as any
+          // other yt-dlp failure.
+          const wrapped = new Error(
+            `yt-dlp binary could not be executed (${err.code || err.message}). ` +
+              `This usually means the binary at "${ytdlpPath}" is missing the ` +
+              `execute permission or doesn't match this machine's architecture.`
+          );
+          wrapped.status = 500;
+          wrapped.cause = err;
+          reject(wrapped);
         });
 
         ytdlp.on("close", (code) => {
@@ -306,6 +341,77 @@ export function spawnYtDlp(args) {
         });
       })
   );
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// BUG FIX: `-J --flat-playlist` against YouTube's tab/continuation API is
+// documented as intermittently returning 0 entries (sometimes literally
+// empty stdout) with a *successful* exit code and no error message at all —
+// this is a known, currently-open yt-dlp/YouTube issue (yt-dlp#11524,
+// yt-dlp#16907), not something fixable from our side of the process
+// boundary. Previously a single empty response was treated as a hard
+// failure and shown straight to the user. Since re-running the exact same
+// command usually succeeds on the next try, retry a couple of times before
+// giving up.
+// NOTE on `attempts`: Netlify's default synchronous function timeout is
+// 10s, and a single yt-dlp invocation can itself take up to
+// YTDLP_TIMEOUT_MS (9s) if it stalls. Keep attempts low (2) so a genuinely
+// slow/stalled call doesn't compound into a guaranteed platform-level
+// timeout — the empty-output case this mostly targets responds fast
+// (YouTube returns a valid-but-empty page quickly), so one retry is enough
+// to ride out that flakiness without risking the overall request.
+export async function spawnYtDlpJsonWithRetry(args, { attempts = 2, delayMs = 300 } = {}) {
+  let lastErr;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    const { code, stdoutData, stderrData } = await spawnYtDlp(args);
+    const isLastAttempt = attempt === attempts;
+
+    if (code !== 0) {
+      lastErr = new Error("yt-dlp exited with a non-zero status");
+      lastErr.status = 502;
+      lastErr.details = cookieAwareErrorDetails(stderrData);
+      if (!isLastAttempt) {
+        await sleep(delayMs);
+        continue;
+      }
+      throw lastErr;
+    }
+
+    const trimmed = (stdoutData || "").trim();
+    if (!trimmed) {
+      lastErr = new Error("yt-dlp exited successfully but returned empty output");
+      lastErr.status = 502;
+      lastErr.details = stderrData
+        ? cookieAwareErrorDetails(stderrData)
+        : "No output and no error from yt-dlp — most likely transient YouTube " +
+          "playlist-extraction flakiness (a known upstream yt-dlp issue), not " +
+          "a problem with this app. Please try again.";
+      if (!isLastAttempt) {
+        console.warn(`[ytdlp] attempt ${attempt}/${attempts} returned empty output, retrying...`);
+        await sleep(delayMs);
+        continue;
+      }
+      throw lastErr;
+    }
+
+    try {
+      return JSON.parse(trimmed);
+    } catch (err) {
+      lastErr = new Error("Failed to parse yt-dlp response as JSON");
+      lastErr.status = 500;
+      lastErr.details = `yt-dlp returned non-JSON output: "${trimmed.slice(0, 300)}"`;
+      if (!isLastAttempt) {
+        console.warn(`[ytdlp] attempt ${attempt}/${attempts} returned unparseable output, retrying...`);
+        await sleep(delayMs);
+        continue;
+      }
+      throw lastErr;
+    }
+  }
+  throw lastErr;
 }
 
 export const CORS_HEADERS = {

@@ -3,8 +3,7 @@ import {
   getCached,
   setCached,
   authArgs,
-  spawnYtDlp,
-  cookieAwareErrorDetails,
+  spawnYtDlpJsonWithRetry,
   CORS_HEADERS,
 } from "./_shared/ytdlpService.mjs";
 
@@ -34,7 +33,7 @@ export const handler = async (event) => {
   }
 
   try {
-    const { code, stdoutData, stderrData } = await spawnYtDlp([
+    const parsed = await spawnYtDlpJsonWithRetry([
       "-J",
       "--flat-playlist",
       "--no-warnings",
@@ -42,18 +41,6 @@ export const handler = async (event) => {
       `ytsearch12:${q}`,
     ]);
 
-    if (code !== 0) {
-      return {
-        statusCode: 502,
-        headers: { "Content-Type": "application/json", ...CORS_HEADERS },
-        body: JSON.stringify({
-          error: "Failed to search YouTube",
-          details: cookieAwareErrorDetails(stderrData),
-        }),
-      };
-    }
-
-    const parsed = JSON.parse(stdoutData);
     const results = (parsed.entries || []).map((item) => ({
       id: item.id,
       title: item.title,
@@ -70,15 +57,18 @@ export const handler = async (event) => {
       body: JSON.stringify(payload),
     };
   } catch (err) {
-    // Covers both JSON.parse failures and any rejection from spawnYtDlp
-    // (e.g. the yt-dlp binary bootstrap failing) — always answer with real
-    // JSON instead of letting Netlify's generic HTML error page leak
-    // through to the frontend.
+    // Covers both JSON.parse failures and any rejection from
+    // spawnYtDlpJsonWithRetry (e.g. the yt-dlp binary bootstrap failing) —
+    // always answer with real JSON instead of letting Netlify's generic
+    // HTML error page leak through to the frontend.
     console.error("Search error:", err);
     return {
       statusCode: err.status || 500,
       headers: { "Content-Type": "application/json", ...CORS_HEADERS },
-      body: JSON.stringify({ error: err.message || "Failed to parse search response" }),
+      body: JSON.stringify({
+        error: err.message || "Failed to parse search response",
+        details: err.details,
+      }),
     };
   }
 };
