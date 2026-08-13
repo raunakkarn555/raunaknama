@@ -5,35 +5,24 @@
 
 [functions]
   node_bundler = "esbuild"
-  # The yt-dlp binary is downloaded by scripts/download-ytdlp.mjs (this
-  # project's own postinstall script — see that file for why we don't use
-  # the ytdlp-nodejs package's own installer/runtime API) into
-  # netlify/functions/_shared/bin/ at `npm install` time. esbuild only
-  # bundles files it can see via require()/import, so without this, the
-  # binary silently gets left out of the deployed function zip — the
-  # function would then try to re-download it into the (read-only)
-  # deployment folder at runtime and crash. This makes sure it ships with
-  # the function.
+  # Ensures the yt-dlp binary is bundled into the serverless function zip artifact
   included_files = ["netlify/functions/_shared/bin/**"]
 
-# `netlify dev` runs this as a subprocess and proxies both the Vite dev
-# server AND the Netlify Functions dev server behind one port (8888) so that
-# /api/* resolves exactly like it does in production. Use `npm run dev`
-# (which now runs `netlify dev`) and open http://localhost:8888 — NOT
-# http://localhost:5173 directly, which has no functions behind it.
 [dev]
-  command = "vite"
+  command = "npm run dev"
   targetPort = 5173
   port = 8888
   publish = "dist"
   functionsPort = 9999
   autoLaunch = false
 
+# Route all requests starting with /api/ to Netlify Serverless Functions
 [[redirects]]
   from = "/api/*"
   to = "/.netlify/functions/:splat"
   status = 200
 
+# Handle Single Page Application (SPA) client-side routing
 [[redirects]]
   from = "/*"
   to = "/index.html"
