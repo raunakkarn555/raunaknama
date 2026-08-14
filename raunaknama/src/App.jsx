@@ -181,16 +181,6 @@ function App() {
             Crafted with <span className="foot-heart" aria-hidden="true">❤️</span> by{' '}
             <span className="foot-credit-name">Raunak</span>
           </span>
-          <a
-            href="#"
-            className="support-dev-btn support-dev-btn--footer"
-            target="_blank"
-            rel="noopener noreferrer"
-            aria-label="Support the developer"
-          >
-            <span aria-hidden="true">☕</span>
-            <span>Support Developer</span>
-          </a>
         </div>
       </div>
     </div>
