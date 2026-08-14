@@ -183,7 +183,7 @@ function App() {
       <div className="site-footer">
         <footer className="foot">
           <span className="foot-tagline">
-            <span aria-hidden="true">🎧</span> The barber shop's old-school Bollywood mixtape.
+            <span aria-hidden="true">🎧</span> Old songs, new memories — every single time.
           </span>
         </footer>
 

@@ -228,6 +228,7 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
   const loadTokenRef = useRef(0); // guards against a stale resolve landing after a newer track switch
   const autoplayHistoryRef = useRef(new Set()); // recently auto-played track ids, so the "similar songs" chain doesn't immediately repeat itself
   const retriedTrackIdsRef = useRef(new Set()); // track ids that already got one forced (cache-bypassing) re-resolve after a playback failure
+  const prefetchedAutoplayRef = useRef(null); // { seedId, track } — the next "similar songs" autoplay pick, looked up + stream-resolved ahead of time
 
   // 0. Fetch available playlists once. This runs in parallel with the
   // playlist-metadata fetch below (which now defaults to "default" instead
@@ -718,14 +719,15 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
   // don't autoplay into full mixes, podcasts, or long videos.
   const MAX_AUTOPLAY_DURATION_SECS = 10 * 60;
 
-  const playNextAutoplayTrack = () => {
-    const seed = currentTrack;
-    if (!seed) {
-      setIsPlaying(false);
-      return;
-    }
+  // Looks up a track "similar to" the given seed (same channel/title, biased
+  // toward actual songs, capped at MAX_AUTOPLAY_DURATION_SECS), skipping
+  // anything already played recently in this chain. Shared by the prefetch
+  // effect below and the fallback path in playNextAutoplayTrack, so both
+  // pick candidates the exact same way.
+  const fetchAutoplayCandidate = useCallback((seed) => {
+    if (!seed) return Promise.resolve(null);
     const q = `${seed.channel || seed.title} song`;
-    fetch(`${API_BASE}/api/search?q=${encodeURIComponent(q)}`)
+    return fetch(`${API_BASE}/api/search?q=${encodeURIComponent(q)}`)
       .then((res) => res.json())
       .then((data) => {
         const candidates = (data.results || []).filter(
@@ -735,7 +737,38 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
             t.duration &&
             t.duration <= MAX_AUTOPLAY_DURATION_SECS
         );
-        const next = candidates[Math.floor(Math.random() * candidates.length)];
+        return candidates[Math.floor(Math.random() * candidates.length)] || null;
+      });
+  }, []);
+
+  const playNextAutoplayTrack = () => {
+    const seed = currentTrack;
+    if (!seed) {
+      setIsPlaying(false);
+      return;
+    }
+
+    // Best case: we already looked up AND stream-resolved the next pick
+    // while this seed track was still playing (see the prefetch effect
+    // below) — hand off to it immediately, no search call, no yt-dlp wait.
+    const prefetched = prefetchedAutoplayRef.current;
+    if (prefetched && prefetched.seedId === seed.id && prefetched.track) {
+      const next = prefetched.track;
+      prefetchedAutoplayRef.current = null;
+      autoplayHistoryRef.current.add(next.id);
+      if (autoplayHistoryRef.current.size > 40) {
+        autoplayHistoryRef.current.clear();
+      }
+      setSearchTrack(next);
+      setActiveSource("search");
+      setIsPlaying(true);
+      return;
+    }
+
+    // Fallback (prefetch hadn't landed yet, or got cleared) — same lookup,
+    // done on demand like before.
+    fetchAutoplayCandidate(seed)
+      .then((next) => {
         if (!next) {
           setIsPlaying(false);
           return;
@@ -753,6 +786,30 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
         setIsPlaying(false);
       });
   };
+
+  // Prefetch the next AUTOPLAY ("similar songs") pick too — same idea as
+  // the playlist-queue prefetch further up: while the current search-
+  // sourced track plays, quietly look up the next candidate AND resolve its
+  // stream URL in the background, so when this track ends the chain hands
+  // off instantly instead of waiting on a fresh search + yt-dlp round-trip.
+  useEffect(() => {
+    if (activeSource !== "search" || !autoplay) return;
+    const seed = currentTrack;
+    if (!seed) return;
+
+    let cancelled = false;
+    fetchAutoplayCandidate(seed)
+      .then((next) => {
+        if (cancelled || !next) return;
+        prefetchedAutoplayRef.current = { seedId: seed.id, track: next };
+        resolveStream(next.id).catch(() => {});
+      })
+      .catch(() => {});
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentTrack?.id, activeSource, autoplay, fetchAutoplayCandidate, resolveStream]);
 
   // Fired when the <audio> element's "ended" event fires. Routes to the
   // right "next track" behavior depending on where the current track came
