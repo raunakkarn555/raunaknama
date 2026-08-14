@@ -340,8 +340,22 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
     setIsSearching(true);
     const handle = setTimeout(() => {
       fetch(`${API_BASE}/api/search?q=${encodeURIComponent(searchQuery)}`)
-        .then((res) => res.json())
-        .then((data) => setSearchResults(data.results || []))
+        .then((res) =>
+          res.json().then((data) => {
+            // Same class of bug as the playlist fetch above: the server can
+            // reply 200 with an empty `results` array, or reply with an
+            // error status and a `details` string explaining why (e.g.
+            // YouTube blocking the server IP). Previously both cases looked
+            // identical to the user (empty results, nothing in the
+            // console), so log the real reason when there is one.
+            if (!res.ok) {
+              console.error("Search error:", data?.details || data?.error || `HTTP ${res.status}`);
+              return [];
+            }
+            return data.results || [];
+          })
+        )
+        .then((results) => setSearchResults(results))
         .catch((err) => {
           console.error("Search error:", err);
           setSearchResults([]);
