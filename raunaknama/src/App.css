@@ -506,6 +506,29 @@
   text-shadow: 0 1px 8px rgba(0, 0, 0, 0.75), 0 1px 3px rgba(0, 0, 0, 0.85);
 }
 
+.foot-tagline-text {
+  display: inline-block;
+  opacity: 0;
+  transform: translateY(10px);
+  filter: blur(4px);
+  transition: opacity 0.45s cubic-bezier(0.22, 1, 0.36, 1),
+    transform 0.45s cubic-bezier(0.22, 1, 0.36, 1),
+    filter 0.45s cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: opacity, transform, filter;
+}
+
+.foot-tagline-text--visible {
+  opacity: 1;
+  transform: translateY(0);
+  filter: blur(0);
+}
+
+@media (max-width: 640px) {
+  .foot-tagline-text {
+    transform: translateY(8px);
+  }
+}
+
 /* ---------- Copyright / credit bar ----------
    Sits in normal flow (right under the tagline) on larger screens. On
    mobile, both the tagline and this credit line detach together as one

@@ -7,6 +7,71 @@ const TOTAL_BG_PHOTOS_MOBILE = 44;
 // Keep in sync with the `max-width: 640px` breakpoint in App.css.
 const MOBILE_BREAKPOINT_QUERY = '(max-width: 640px)';
 
+// Rotating footer taglines — fades/sweeps in on a fixed interval.
+const FOOTER_TAGLINES = [
+  "Some songs don't play. They understand.",
+  'Pause the world. Press play.',
+  'Where every feeling finds its sound.',
+  'Let the music say what words cannot.',
+  'A little peace, one song away.',
+  'Some moments deserve a soundtrack.',
+  'Close your eyes. Let the world fade.',
+  "Music for the places words can't reach.",
+  'Find yourself between the melodies.',
+  "Not every silence needs to be filled. Some need music.",
+  'One song can change the way a moment feels.',
+  'Breathe in peace. Breathe out the noise.',
+  'Your escape is just one song away.',
+  'For the nights you feel everything.',
+  'Let the rhythm slow down your thoughts.',
+  "Somewhere between chaos and calm, there's music.",
+  "Memories fade. The feeling of a song doesn't.",
+  'Turn down the noise. Turn up your soul.',
+  'Every mood has a melody waiting for you.',
+  'Stay a little longer. The next song might be the one.',
+  'Lost in sound. Found in peace.',
+  'Let your heart choose the next song.',
+  'Because some feelings deserve to be heard.',
+  "The world can wait. This song can't.",
+  'A melody for every version of you.',
+  'Your story sounds different today.',
+  'Peace begins where the noise ends.',
+  'Sometimes, all you need is the right song.',
+];
+
+// How long each footer tagline stays on screen before sweeping to the next one.
+const FOOTER_TAGLINE_INTERVAL_MS = 4500;
+
+// Rotating, fading footer tagline — cycles through FOOTER_TAGLINES on a fixed interval.
+function FooterTagline() {
+  const [index, setIndex] = useState(0);
+  const [visible, setVisible] = useState(true);
+
+  useEffect(() => {
+    const swapId = setInterval(() => {
+      setVisible(false);
+      const revealId = setTimeout(() => {
+        setIndex((prev) => (prev + 1) % FOOTER_TAGLINES.length);
+        setVisible(true);
+      }, 450);
+      return () => clearTimeout(revealId);
+    }, FOOTER_TAGLINE_INTERVAL_MS);
+    return () => clearInterval(swapId);
+  }, []);
+
+  return (
+    <span className="foot-tagline">
+      <span aria-hidden="true">🎧</span>
+      <span
+        key={index}
+        className={`foot-tagline-text${visible ? ' foot-tagline-text--visible' : ''}`}
+      >
+        {FOOTER_TAGLINES[index]}
+      </span>
+    </span>
+  );
+}
+
 const HamburgerIcon = ({ open }) => (
   <svg viewBox="0 0 24 24" width="20" height="20" fill="none" aria-hidden="true">
     <path
@@ -182,9 +247,7 @@ function App() {
 
       <div className="site-footer">
         <footer className="foot">
-          <span className="foot-tagline">
-            <span aria-hidden="true">🎧</span> Old songs, new memories — every single time.
-          </span>
+          <FooterTagline />
         </footer>
 
         <div className="foot-copyright">
