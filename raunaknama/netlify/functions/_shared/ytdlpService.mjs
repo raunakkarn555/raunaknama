@@ -3,6 +3,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import https from "https";
+import zlib from "zlib";
 
 // NOTE: this file deliberately does NOT import anything from the
 // `ytdlp-nodejs` package. That package resolves its own binary path using
@@ -50,10 +51,17 @@ function resolveCookiesPath() {
 
   if (process.env.YTDLP_COOKIES_B64) {
     try {
-      const decoded = Buffer.from(process.env.YTDLP_COOKIES_B64, "base64").toString("utf8");
+      const raw = Buffer.from(process.env.YTDLP_COOKIES_B64, "base64");
+      // Netlify env vars are capped at ~5000 chars, and a plain base64'd
+      // cookies.txt blows past that. So we gzip-compress before base64'ing
+      // (see scripts/encode-cookies.mjs) and gunzip here on read. Detect the
+      // gzip magic bytes (1f 8b) so a plain, uncompressed base64 value still
+      // works too — no silent breakage for anyone who sets it the old way.
+      const isGzip = raw.length > 2 && raw[0] === 0x1f && raw[1] === 0x8b;
+      const decoded = (isGzip ? zlib.gunzipSync(raw) : raw).toString("utf8");
       const tmpPath = path.join(os.tmpdir(), "yt-cookies.txt");
       fs.writeFileSync(tmpPath, decoded, "utf8");
-      console.log("Loaded YouTube cookies from YTDLP_COOKIES_B64");
+      console.log(`Loaded YouTube cookies from YTDLP_COOKIES_B64 (${isGzip ? "gzip" : "plain"})`);
       return tmpPath;
     } catch (err) {
       console.error("Failed to decode YTDLP_COOKIES_B64:", err.message);
