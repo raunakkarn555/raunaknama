@@ -2,8 +2,8 @@ import React, { useCallback, useEffect, useState } from 'react';
 import Player from './components/Player';
 import './App.css';
 
-const TOTAL_BG_PHOTOS = 9;
-const TOTAL_BG_PHOTOS_MOBILE = 13;
+const TOTAL_BG_PHOTOS = 40;
+const TOTAL_BG_PHOTOS_MOBILE = 44;
 // Keep in sync with the `max-width: 640px` breakpoint in App.css.
 const MOBILE_BREAKPOINT_QUERY = '(max-width: 640px)';
 
@@ -152,6 +152,16 @@ function App() {
             <span className="dot" aria-hidden="true" />
             <span>On Air</span>
           </div>
+          <a
+            href="#"
+            className="support-dev-btn support-dev-btn--nav"
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label="Support the developer"
+          >
+            <span aria-hidden="true">☕</span>
+            <span>Support Developer</span>
+          </a>
         </div>
       </header>
 
@@ -171,6 +181,16 @@ function App() {
             Crafted with <span className="foot-heart" aria-hidden="true">❤️</span> by{' '}
             <span className="foot-credit-name">Raunak</span>
           </span>
+          <a
+            href="#"
+            className="support-dev-btn support-dev-btn--footer"
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label="Support the developer"
+          >
+            <span aria-hidden="true">☕</span>
+            <span>Support Developer</span>
+          </a>
         </div>
       </div>
     </div>
