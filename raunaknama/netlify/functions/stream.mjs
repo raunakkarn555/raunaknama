@@ -19,8 +19,15 @@ import {
 //      direct-URL formats for those). If that's all that's available, fall
 //      back to bestaudio even if it IS HLS — the frontend knows how to play
 //      that via hls.js, it's just a different code path.
+//   4. Last resort: "best" (a combined video+audio format). A handful of
+//      videos expose no audio-ONLY format to any client at all (yt-dlp then
+//      errors with "Requested format is not available" even on "bestaudio",
+//      which was previously the end of the chain and left those tracks
+//      completely unplayable). An <audio>/<video> element can still play
+//      just the audio track out of a combined file, so this recovers those
+//      tracks instead of failing outright.
 const FORMAT_SELECTOR =
-  "ba[ext=m4a][protocol!*=m3u8]/ba[protocol!*=m3u8]/ba[ext=m4a]/bestaudio";
+  "ba[ext=m4a][protocol!*=m3u8]/ba[protocol!*=m3u8]/ba[ext=m4a]/bestaudio/best";
 
 function isHlsFormat(info) {
   const protocol = String(info?.protocol || "");

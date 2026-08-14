@@ -179,30 +179,18 @@ function findBundledBinary() {
   return null;
 }
 
-function downloadToTmp() {
+// Downloads `url` (following redirects) to `destPath`, following redirects.
+function downloadFile(url, destPath, redirectsLeft = 5) {
   return new Promise((resolve, reject) => {
-    let filename;
-    try {
-      filename = binaryFilename();
-    } catch (err) {
-      reject(err);
-      return;
-    }
-    const url = `https://github.com/yt-dlp/yt-dlp/releases/latest/download/${filename}`;
-    const file = fs.createWriteStream(TMP_YTDLP_PATH);
+    const file = fs.createWriteStream(destPath);
     const req = https.get(url, { headers: { "User-Agent": "raunaknama-fn" } }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         file.close();
-        https
-          .get(res.headers.location, { headers: { "User-Agent": "raunaknama-fn" } }, (res2) => {
-            res2.pipe(fs.createWriteStream(TMP_YTDLP_PATH));
-            res2.on("end", () => {
-              fs.chmodSync(TMP_YTDLP_PATH, 0o755);
-              resolve(TMP_YTDLP_PATH);
-            });
-            res2.on("error", reject);
-          })
-          .on("error", reject);
+        if (redirectsLeft <= 0) {
+          reject(new Error("Too many redirects"));
+          return;
+        }
+        downloadFile(res.headers.location, destPath, redirectsLeft - 1).then(resolve, reject);
         return;
       }
       if (res.statusCode !== 200) {
@@ -211,15 +199,41 @@ function downloadToTmp() {
         return;
       }
       res.pipe(file);
-      file.on("finish", () => {
-        file.close(() => {
-          fs.chmodSync(TMP_YTDLP_PATH, 0o755);
-          resolve(TMP_YTDLP_PATH);
-        });
-      });
+      file.on("finish", () => file.close(() => resolve()));
+      res.on("error", reject);
     });
     req.on("error", reject);
   });
+}
+
+// BUG FIX (spawn ETXTBSY): this used to download straight into
+// TMP_YTDLP_PATH — the exact path spawnYtDlp() later exec's. Linux refuses
+// to open a file for writing while it's mapped/running as an executable
+// ("text file busy"). Two requests landing on the same warm container
+// close together — one still mid-download-write, the other already
+// spawning the binary from an earlier completed download — could race on
+// that same path and throw `spawn ETXTBSY`. Downloading to a private,
+// per-attempt staging path and then atomically fs.renameSync'ing it onto
+// TMP_YTDLP_PATH only once fully written means we never open the live,
+// executable path for writing at all, so nothing can collide with a
+// concurrent spawn of it. rename(2) on the same filesystem (both under
+// os.tmpdir()) is atomic, so a concurrent reader either sees the old file
+// or the fully-written new one — never a partial write.
+async function downloadToTmp() {
+  const filename = binaryFilename();
+  const url = `https://github.com/yt-dlp/yt-dlp/releases/latest/download/${filename}`;
+  const stagingPath = `${TMP_YTDLP_PATH}.download-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  try {
+    await downloadFile(url, stagingPath);
+    fs.chmodSync(stagingPath, 0o755);
+    fs.renameSync(stagingPath, TMP_YTDLP_PATH);
+    return TMP_YTDLP_PATH;
+  } finally {
+    // Clean up the staging file if something went wrong before the rename
+    // (rename having succeeded means this path no longer exists, so this
+    // is a silent no-op in the success case).
+    fs.promises.unlink(stagingPath).catch(() => {});
+  }
 }
 
 let ytdlpReadyPromise = null;
@@ -267,46 +281,65 @@ async function ensureYtDlp() {
 // page.
 const YTDLP_TIMEOUT_MS = 9000;
 
-export function spawnYtDlp(args) {
-  return ensureYtDlp().then(
-    (ytdlpPath) =>
-      new Promise((resolve, reject) => {
-        const ytdlp = spawn(ytdlpPath, args);
+function spawnYtDlpOnce(ytdlpPath, args) {
+  return new Promise((resolve, reject) => {
+    const ytdlp = spawn(ytdlpPath, args);
 
-        let stdoutData = "";
-        let stderrData = "";
-        let settled = false;
+    let stdoutData = "";
+    let stderrData = "";
+    let settled = false;
 
-        const timer = setTimeout(() => {
-          if (settled) return;
-          settled = true;
-          ytdlp.kill("SIGKILL");
-          resolve({
-            code: 124,
-            stdoutData,
-            stderrData: stderrData + "\n[timed out after " + YTDLP_TIMEOUT_MS + "ms]",
-          });
-        }, YTDLP_TIMEOUT_MS);
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      ytdlp.kill("SIGKILL");
+      resolve({
+        code: 124,
+        stdoutData,
+        stderrData: stderrData + "\n[timed out after " + YTDLP_TIMEOUT_MS + "ms]",
+      });
+    }, YTDLP_TIMEOUT_MS);
 
-        ytdlp.stdout.on("data", (chunk) => { stdoutData += chunk; });
-        ytdlp.stderr.on("data", (chunk) => { stderrData += chunk.toString(); });
+    ytdlp.stdout.on("data", (chunk) => { stdoutData += chunk; });
+    ytdlp.stderr.on("data", (chunk) => { stderrData += chunk.toString(); });
 
-        ytdlp.on("error", (err) => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timer);
-          reject(err);
-        });
+    ytdlp.on("error", (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(err);
+    });
 
-        ytdlp.on("close", (code) => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timer);
-          resolve({ code, stdoutData, stderrData });
-        });
-      })
-  );
+    ytdlp.on("close", (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ code, stdoutData, stderrData });
+    });
+  });
 }
+
+export async function spawnYtDlp(args) {
+  const ytdlpPath = await ensureYtDlp();
+  try {
+    return await spawnYtDlpOnce(ytdlpPath, args);
+  } catch (err) {
+    // Defensive second line of defense on top of the atomic-rename fix in
+    // downloadToTmp(): if the OS still refuses to exec the binary because
+    // it's momentarily open for writing elsewhere (ETXTBSY) — e.g. a
+    // concurrent request on the same warm container mid-(re)download — a
+    // short wait almost always resolves it, since writes to the file are
+    // fast and exclusive. One retry avoids surfacing a raw, unhelpful
+    // "spawn ETXTBSY" to the frontend for what's just a brief race.
+    if (err && err.code === "ETXTBSY") {
+      console.warn("[ytdlp] spawn ETXTBSY, retrying once after a short delay...");
+      await new Promise((r) => setTimeout(r, 300));
+      return await spawnYtDlpOnce(ytdlpPath, args);
+    }
+    throw err;
+  }
+}
+
 
 export const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
