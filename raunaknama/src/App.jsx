@@ -40,7 +40,7 @@ const FOOTER_TAGLINES = [
 ];
 
 // How long each footer tagline stays on screen before sweeping to the next one.
-const FOOTER_TAGLINE_INTERVAL_MS = 4500;
+const FOOTER_TAGLINE_INTERVAL_MS = 10000;
 
 // Rotating, fading footer tagline — cycles through FOOTER_TAGLINES on a fixed interval.
 function FooterTagline() {
@@ -164,19 +164,7 @@ function App() {
     setBgIndex((prev) => (prev % totalBgPhotos) + 1);
   }, [totalBgPhotos]);
 
-  const [supportOpen, setSupportOpen] = useState(false);
-
   const closeMenu = useCallback(() => setMenuOpen(false), []);
-
-  // Close the support-developer card with Escape, from anywhere on the page.
-  useEffect(() => {
-    if (!supportOpen) return;
-    const onKey = (e) => {
-      if (e.key === 'Escape') setSupportOpen(false);
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [supportOpen]);
 
   // Close the drawer with Escape, from anywhere on the page.
   useEffect(() => {
@@ -229,15 +217,6 @@ function App() {
             <span className="dot" aria-hidden="true" />
             <span>On Air</span>
           </div>
-          <button
-            type="button"
-            className="support-dev-btn support-dev-btn--nav"
-            onClick={() => setSupportOpen(true)}
-            aria-label="Support the developer"
-          >
-            <span aria-hidden="true">☕</span>
-            <span>Support Developer</span>
-          </button>
         </div>
       </header>
 
@@ -257,63 +236,6 @@ function App() {
           </span>
         </div>
       </div>
-
-      {supportOpen && (
-        <div
-          className="support-modal-overlay"
-          onClick={() => setSupportOpen(false)}
-        >
-          <div
-            className="support-modal-card"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="support-modal-title"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <button
-              type="button"
-              className="support-modal-close"
-              onClick={() => setSupportOpen(false)}
-              aria-label="Close"
-            >
-              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" aria-hidden="true">
-                <path d="M5 5l14 14M19 5L5 19" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-              </svg>
-            </button>
-
-            <span className="support-modal-icon" aria-hidden="true">☕</span>
-
-            <h2 id="support-modal-title" className="support-modal-title">
-              Keep the Station on Air
-            </h2>
-
-            <p className="support-modal-line">
-              Every crossfade, every playlist, every late-night bug fix — running on chai and stubbornness.
-            </p>
-            <p className="support-modal-sub">
-              If Raunaknama's been your soundtrack, a small tip helps keep it spinning.
-            </p>
-
-            <a
-              href="#"
-              className="support-modal-cta"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              <span aria-hidden="true">☕</span>
-              <span>Send a Tip</span>
-            </a>
-
-            <button
-              type="button"
-              className="support-modal-dismiss"
-              onClick={() => setSupportOpen(false)}
-            >
-              Maybe later
-            </button>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

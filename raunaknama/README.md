@@ -291,4 +291,22 @@ raunaknama/
 └── serviceAccountKey.json    # You add this yourself (gitignored) — needed only for `npm run seed`
 ```
 
+---
+
+## 8. Password gate
+
+The whole site sits behind a password screen (`src/components/PasswordGate.jsx`),
+checked by a Netlify Function (`netlify/functions/auth.mjs`) — the password
+itself is never in the frontend code or bundle.
+
+- Set it via two **server** environment variables (see `.env.example`):
+  - `SITE_PASSWORD` — the password visitors type in.
+  - `SITE_AUTH_SECRET` — a random string used to sign session cookies
+    (generate one with `openssl rand -hex 32`).
+- On Netlify: **Site settings → Environment variables**. Locally: your `.env`
+  file, used by `netlify dev`.
+- After a correct password, that browser gets an `HttpOnly` session cookie
+  good for **7 days** — it won't be asked again on that device until it
+  expires. A different browser/device (no cookie yet) is always asked.
+
 Have fun with it 💈
