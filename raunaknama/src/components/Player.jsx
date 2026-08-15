@@ -643,6 +643,7 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
   const autoplayHistoryRef = useRef(new Set()); // recently auto-played track ids, so the "similar songs" chain doesn't immediately repeat itself
   const retriedTrackIdsRef = useRef(new Set()); // track ids that already got one forced (cache-bypassing) re-resolve after a playback failure
   const prefetchedAutoplayRef = useRef(null); // { seedId, track } — the next "similar songs" autoplay pick, looked up + stream-resolved ahead of time
+  const pendingBackgroundResumeRef = useRef(false); // true while we're waiting for the tab to come back to the foreground before retrying a failed resolve (see handleStreamFailure)
 
   // 0. Fetch available playlists once. This runs in parallel with the
   // playlist-metadata fetch below (which now defaults to "default" instead
@@ -1367,7 +1368,98 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
     }
   };
 
-  const handleStreamFailure = (message) => {
+  // Backoff delays (ms) used by handleStreamFailure's hidden-tab retry loop
+  // below. Mobile browsers grant a tab with an actively-playing MediaSession
+  // a limited amount of background execution time (that's precisely why
+  // audio keeps playing after the screen locks) — a failed fetch in that
+  // window is almost always just bad timing, not a dead backend, and a
+  // short retry loop recovers the large majority of these on its own,
+  // without the listener ever noticing or seeing an error. ~89s of total
+  // retrying covers the sort of brief background-fetch stalls this causes.
+  const HIDDEN_RETRY_BACKOFF_MS = [1500, 4000, 8000, 15000, 30000, 30000];
+
+  const handleStreamFailure = (message, hiddenRetryAttempt = 0) => {
+    // Mobile browsers (Android Chrome especially) heavily throttle network
+    // requests and timers for a tab once it's backgrounded — which is
+    // exactly what happens when the screen gets locked during background
+    // audio playback. When that happens, the "next track" resolve fetch
+    // (fired from the <audio> "ended" event) can fail or time out for no
+    // real backend reason. Previously that got treated as a genuine
+    // failure: it counted toward consecutiveFailures, showed a scary
+    // "backend is likely blocked or down" toast, and tried to auto-skip via
+    // setTimeout — which is *itself* throttled while hidden, so skips piled
+    // up and stalled out. That matches the reported bug: playback died
+    // after the first track while locked, and only recovered once the
+    // phone was unlocked and the site was back in the foreground.
+    //
+    // Fix, two layers, both silent (no error toast, no consecutiveFailures
+    // bump) while the tab is hidden:
+    //   1. First, retry the same track with backoff a handful of times —
+    //      this is what lets the queue keep auto-advancing while the phone
+    //      stays locked, matching what background playback should feel
+    //      like, since most throttled fetches succeed within this window.
+    //   2. Only if every backoff attempt also fails (persistent bad network,
+    //      or the OS/browser suspended the tab harder than usual) do we give
+    //      up retrying blind and instead wait for the tab to actually become
+    //      visible again before trying once more.
+    if (typeof document !== "undefined" && document.hidden) {
+      const trackId = currentTrack?.id;
+      if (!trackId) return;
+
+      if (hiddenRetryAttempt < HIDDEN_RETRY_BACKOFF_MS.length) {
+        setTimeout(() => {
+          // The track may have changed, or the tab may have come back to
+          // the foreground, while we were waiting — either way just let
+          // the normal load effect / a future failure handle it instead of
+          // stepping on a newer load.
+          if (currentTrack?.id !== trackId) return;
+          const token = ++loadTokenRef.current;
+          resolveStream(trackId, { forceRefresh: true })
+            .then((data) => {
+              if (token !== loadTokenRef.current) return;
+              attachStreamAndPlay(data, token, true);
+            })
+            .catch((err) => {
+              if (token !== loadTokenRef.current) return;
+              handleStreamFailure(err.details || err.message, hiddenRetryAttempt + 1);
+            });
+        }, HIDDEN_RETRY_BACKOFF_MS[hiddenRetryAttempt]);
+        return;
+      }
+
+      if (!pendingBackgroundResumeRef.current) {
+        pendingBackgroundResumeRef.current = true;
+        const onVisible = () => {
+          if (document.hidden) return;
+          document.removeEventListener("visibilitychange", onVisible);
+          pendingBackgroundResumeRef.current = false;
+
+          const resumeTrackId = currentTrack?.id;
+          if (!resumeTrackId) return;
+          const token = ++loadTokenRef.current;
+          setIsTrackLoading(true);
+          resolveStream(resumeTrackId, { forceRefresh: true })
+            .then((data) => {
+              if (token !== loadTokenRef.current) return;
+              setIsTrackLoading(false);
+              attachStreamAndPlay(data, token, true);
+            })
+            .catch((err) => {
+              if (token !== loadTokenRef.current) return;
+              setIsTrackLoading(false);
+              console.warn(
+                "Resume-on-foreground retry failed:",
+                err.message,
+                err.details ? `— ${err.details}` : ""
+              );
+              handleStreamFailure(err.details || err.message);
+            });
+        };
+        document.addEventListener("visibilitychange", onVisible);
+      }
+      return;
+    }
+
     setIsPlaying(false);
 
     // Offline is almost certainly the real reason a stream just failed to
