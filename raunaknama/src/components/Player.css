@@ -1010,6 +1010,110 @@ input[type="range"]:focus-visible {
   color: var(--cream);
 }
 
+/* ---------- Offline banner ---------- */
+/* Persistent (not auto-dismissing) — stays up for the whole time the
+   connection is down, inside the player dock so it's visible no matter
+   which state (loading/error/playing) the player is in. */
+
+.offline-banner {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 8px 14px;
+  margin-bottom: 8px;
+  border-radius: 12px;
+  background: rgba(184, 51, 58, 0.16);
+  border: 1px solid rgba(184, 51, 58, 0.4);
+  color: var(--cream);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.offline-banner svg {
+  flex: 0 0 auto;
+  color: var(--stripe-gold);
+}
+
+/* ---------- Toasts ---------- */
+/* Small, auto-dismissing notification stack for errors and connectivity
+   changes — fixed to the top of the viewport so it never competes for
+   space with (or gets hidden behind) the bottom-docked player. */
+
+.toast-stack {
+  position: fixed;
+  top: calc(14px + env(safe-area-inset-top));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 300;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(92vw, 380px);
+  pointer-events: none;
+}
+
+.toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: linear-gradient(135deg, rgba(30, 14, 17, 0.96), rgba(16, 8, 10, 0.96));
+  border: 1px solid var(--glass-border);
+  box-shadow: 0 16px 40px -16px rgba(0, 0, 0, 0.75);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  color: var(--cream);
+  font-size: 12.5px;
+  line-height: 1.4;
+  pointer-events: auto;
+  animation: toast-in 0.3s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.toast--error {
+  border-left: 3px solid var(--stripe-red);
+}
+
+.toast--warning {
+  border-left: 3px solid var(--stripe-gold);
+}
+
+.toast--success {
+  border-left: 3px solid #4caf7d;
+}
+
+.toast-message {
+  flex: 1 1 auto;
+}
+
+.toast-dismiss {
+  flex: 0 0 auto;
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+}
+
+.toast-dismiss:hover {
+  color: var(--cream);
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 /* ---------- Utility ---------- */
 
 .line-clamp-2 {

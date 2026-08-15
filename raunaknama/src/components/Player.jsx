@@ -175,6 +175,17 @@ const DeviceIcon = () => (
   </svg>
 );
 
+const OfflineIcon = () => (
+  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M2 2l20 20" />
+    <path d="M8.5 16.5a5 5 0 0 1 5.6-1.1" />
+    <path d="M5 12.5a10 10 0 0 1 3.5-2.3" />
+    <path d="M11.5 8.06A10 10 0 0 1 19 11.5" />
+    <path d="M15.5 5.5A14 14 0 0 0 4 9" />
+    <circle cx="12" cy="20" r="1" fill="currentColor" stroke="none" />
+  </svg>
+);
+
 // --- Local (on-device) custom playlist storage ---
 // These playlists are created by the listener and saved ONLY in this
 // browser's localStorage — never sent to, or fetched from, the server.
@@ -201,15 +212,50 @@ const persistLocalPlaylists = (list) => {
   }
 };
 
+// --- Resume playback position ---
+// Remembers which playlist/track (or search pick) was playing and exactly
+// where in it, so reopening the tab picks up close to where you left off
+// instead of starting from 0:00 every time. Saved only on this device.
+const PLAYBACK_STATE_STORAGE_KEY = "raunaknama_playback_state_v1";
+
+const loadPlaybackState = () => {
+  try {
+    const raw = window.localStorage.getItem(PLAYBACK_STATE_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (err) {
+    console.warn("Could not read saved playback position:", err);
+    return null;
+  }
+};
+
+const savePlaybackState = (state) => {
+  try {
+    window.localStorage.setItem(PLAYBACK_STATE_STORAGE_KEY, JSON.stringify(state));
+  } catch (err) {
+    // Private browsing / storage full — resume just won't work next time.
+  }
+};
+
 export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
+  // Read once, synchronously, before any state is seeded below — several
+  // pieces of initial state (active playlist, track index, search pick,
+  // volume) fall back to whatever was saved here so playback can resume.
+  const initialPlaybackStateRef = useRef(loadPlaybackState());
+  const didRestorePlaylistRef = useRef(false);
+  const resumeTimeAppliedRef = useRef(false);
+
   const [playlist, setPlaylist] = useState(null);
-  const [currentIndex, setCurrentIndex] = useState(0);
+  const [currentIndex, setCurrentIndex] = useState(
+    () => initialPlaybackStateRef.current?.currentIndex || 0
+  );
   const [isPlaying, setIsPlaying] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
   const [playlists, setPlaylists] = useState([]);
-  const [activePlaylistId, setActivePlaylistId] = useState("default");
+  const [activePlaylistId, setActivePlaylistId] = useState(
+    () => initialPlaybackStateRef.current?.activePlaylistId || "default"
+  );
 
   const [shuffle, setShuffle] = useState(false);
   const [shuffleOrder, setShuffleOrder] = useState([]);
@@ -223,12 +269,21 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
   const [searchResults, setSearchResults] = useState([]);
   const [isSearching, setIsSearching] = useState(false);
   const [searchFocused, setSearchFocused] = useState(false);
-  const [searchTrack, setSearchTrack] = useState(null);
-  const [activeSource, setActiveSource] = useState("playlist");
+  const [searchTrack, setSearchTrack] = useState(
+    () => initialPlaybackStateRef.current?.activeSource === "search"
+      ? initialPlaybackStateRef.current?.searchTrack || null
+      : null
+  );
+  const [activeSource, setActiveSource] = useState(
+    () => initialPlaybackStateRef.current?.activeSource || "playlist"
+  );
 
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
-  const [volume, setVolume] = useState(1);
+  const [volume, setVolume] = useState(() => {
+    const saved = initialPlaybackStateRef.current?.volume;
+    return typeof saved === "number" && saved >= 0 && saved <= 1 ? saved : 1;
+  });
   const [showQueue, setShowQueue] = useState(false);
 
   const [playbackError, setPlaybackError] = useState(null);
@@ -238,6 +293,46 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
   // "Loading…" indicator next to the track so listeners know it's on its
   // way instead of wondering why nothing's happening yet.
   const [isTrackLoading, setIsTrackLoading] = useState(false);
+
+  // Toasts — small, auto-dismissing notifications for errors and network
+  // status, so a failed track or a dropped connection doesn't have to take
+  // over (or silently not show up in) the main player UI.
+  const [toasts, setToasts] = useState([]);
+  const toastIdRef = useRef(0);
+  const pushToast = useCallback((message, type = "error", durationMs = 4500) => {
+    if (!message) return;
+    const id = ++toastIdRef.current;
+    setToasts((prev) => [...prev, { id, message, type }]);
+    setTimeout(() => {
+      setToasts((prev) => prev.filter((t) => t.id !== id));
+    }, durationMs);
+  }, []);
+  const dismissToast = useCallback((id) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  }, []);
+
+  // Offline / network-aware handling — playback over a flaky or dropped
+  // connection fails in confusing ways otherwise (tracks just silently
+  // won't load), so surface it plainly.
+  const [isOnline, setIsOnline] = useState(
+    () => typeof navigator === "undefined" || navigator.onLine
+  );
+  useEffect(() => {
+    const handleOnline = () => {
+      setIsOnline(true);
+      pushToast("Back online.", "success", 3000);
+    };
+    const handleOffline = () => {
+      setIsOnline(false);
+      pushToast("You're offline — playback may be interrupted.", "warning", 6000);
+    };
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+    };
+  }, [pushToast]);
 
   // Custom playlists that any listener can create — saved only on THIS
   // device (localStorage), never on the server.
@@ -298,19 +393,32 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
   useEffect(() => {
     if (!activePlaylistId) return;
 
+    // On the very first run of this effect, if there's a saved session for
+    // this exact playlist, restore its track index (and, if it was a
+    // search pick playing, leave activeSource/searchTrack alone instead of
+    // forcing back to "playlist") instead of always resetting to track 0.
+    const saved = initialPlaybackStateRef.current;
+    const isInitialRestore =
+      !didRestorePlaylistRef.current && saved && saved.activePlaylistId === activePlaylistId;
+    const restoredWasSearch = isInitialRestore && saved.activeSource === "search";
+    didRestorePlaylistRef.current = true;
+
     // Local (on-device) custom playlists never touch the network — they're
     // read straight out of component state, which itself is backed by
     // this browser's localStorage.
     if (activePlaylistId.startsWith("local:")) {
       const local = customPlaylists.find((p) => p.id === activePlaylistId);
+      const tracks = local ? local.tracks : [];
       setPlaylist({
         playlistTitle: local ? local.label : "Custom playlist",
-        tracks: local ? local.tracks : [],
+        tracks,
       });
-      setCurrentIndex(0);
+      setCurrentIndex(
+        isInitialRestore ? Math.min(Math.max(saved.currentIndex || 0, 0), Math.max(tracks.length - 1, 0)) : 0
+      );
       setShuffle(false);
       setShuffleOrder([]);
-      setActiveSource("playlist");
+      if (!restoredWasSearch) setActiveSource("playlist");
       setError(
         local && local.tracks.length === 0
           ? "This playlist is empty — use the + button on any song to add it here."
@@ -342,10 +450,14 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
       .then((data) => {
         if (data.tracks && data.tracks.length > 0) {
           setPlaylist(data);
-          setCurrentIndex(0);
+          setCurrentIndex(
+            isInitialRestore
+              ? Math.min(Math.max(saved.currentIndex || 0, 0), data.tracks.length - 1)
+              : 0
+          );
           setShuffle(false);
           setShuffleOrder([]);
-          setActiveSource("playlist");
+          if (!restoredWasSearch) setActiveSource("playlist");
         } else {
           setError("No tracks found in playlist");
         }
@@ -355,8 +467,9 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
         console.error("Playlist Fetch Error:", err);
         setError(`Could not load playlist: ${err.message}`);
         setLoading(false);
+        pushToast(`Could not load playlist: ${err.message}`, "error");
       });
-  }, [activePlaylistId, customPlaylists]);
+  }, [activePlaylistId, customPlaylists, pushToast]);
 
   // 2. Search Debounce
   useEffect(() => {
@@ -377,7 +490,9 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
             // identical to the user (empty results, nothing in the
             // console), so log the real reason when there is one.
             if (!res.ok) {
-              console.error("Search error:", data?.details || data?.error || `HTTP ${res.status}`);
+              const reason = data?.details || data?.error || `HTTP ${res.status}`;
+              console.error("Search error:", reason);
+              pushToast(`Search failed: ${reason}`, "error");
               return [];
             }
             return data.results || [];
@@ -387,12 +502,16 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
         .catch((err) => {
           console.error("Search error:", err);
           setSearchResults([]);
+          pushToast(
+            isOnline ? "Search failed — please try again." : "You're offline — search unavailable.",
+            "error"
+          );
         })
         .finally(() => setIsSearching(false));
     }, 450);
 
     return () => clearTimeout(handle);
-  }, [searchQuery]);
+  }, [searchQuery, pushToast, isOnline]);
 
   const currentTrack =
     activeSource === "search" ? searchTrack : playlist?.tracks?.[currentIndex];
@@ -600,6 +719,172 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
     };
   }, []);
 
+  // Keep the <audio> element's actual volume in sync with the volume state
+  // — covers the initial mount (including a resumed/saved volume) and
+  // volume changes made via the keyboard shortcuts below.
+  useEffect(() => {
+    if (audioRef.current) audioRef.current.volume = volume;
+  }, [volume]);
+
+  // ---------- Resume playback position: periodic + event-based saving ----------
+  // Snapshots exactly what's playing and where, every few seconds and at
+  // key moments (tab hidden, page unload, track/playlist change), so the
+  // next visit can pick back up close to this spot.
+  useEffect(() => {
+    if (!currentTrack) return;
+
+    const persist = () => {
+      savePlaybackState({
+        activePlaylistId,
+        currentIndex,
+        activeSource,
+        searchTrack: activeSource === "search" ? searchTrack : null,
+        trackId: currentTrack.id,
+        currentTime: audioRef.current?.currentTime || 0,
+        volume,
+      });
+    };
+
+    const intervalId = setInterval(persist, 5000);
+    document.addEventListener("visibilitychange", persist);
+    window.addEventListener("pagehide", persist);
+    return () => {
+      clearInterval(intervalId);
+      document.removeEventListener("visibilitychange", persist);
+      window.removeEventListener("pagehide", persist);
+      persist();
+    };
+  }, [currentTrack?.id, activePlaylistId, currentIndex, activeSource, searchTrack, volume]);
+
+  // ---------- Media Session API ----------
+  // Powers lock-screen / notification-shade playback controls and
+  // earphone/Bluetooth media buttons — without this, backgrounding the tab
+  // or locking the phone leaves the listener with no way to control
+  // playback at all.
+  useEffect(() => {
+    if (!("mediaSession" in navigator) || !currentTrack) return;
+    try {
+      navigator.mediaSession.metadata = new window.MediaMetadata({
+        title: currentTrack.title || "Raunaknama",
+        artist:
+          activeSource === "search"
+            ? currentTrack.channel || "Raunaknama"
+            : playlist?.playlistTitle || "Raunaknama",
+        album: "Raunaknama",
+        artwork: [
+          { src: "/icon-192.png", sizes: "192x192", type: "image/png" },
+          { src: "/icon-512.png", sizes: "512x512", type: "image/png" },
+        ],
+      });
+    } catch (err) {
+      // Not supported in this browser — harmless to skip.
+    }
+  }, [currentTrack?.id, currentTrack?.title, currentTrack?.channel, activeSource, playlist?.playlistTitle]);
+
+  useEffect(() => {
+    if (!("mediaSession" in navigator)) return;
+    navigator.mediaSession.playbackState = isPlaying ? "playing" : "paused";
+  }, [isPlaying]);
+
+  // Re-registered every render (cheap) so each handler always closes over
+  // the latest handleNext/handlePrev/audioRef — these aren't memoized, so a
+  // one-time (mount-only) registration would go stale after the first
+  // track change.
+  useEffect(() => {
+    if (!("mediaSession" in navigator)) return;
+    const ms = navigator.mediaSession;
+    const setHandler = (action, handler) => {
+      try {
+        ms.setActionHandler(action, handler);
+      } catch (err) {
+        // Action not supported in this browser — harmless to skip.
+      }
+    };
+
+    setHandler("play", () => {
+      const audio = audioRef.current;
+      if (audio) audio.play().catch(() => {});
+    });
+    setHandler("pause", () => {
+      audioRef.current?.pause();
+    });
+    setHandler("previoustrack", () => handlePrev());
+    setHandler("nexttrack", () => handleNext());
+    setHandler("seekbackward", (details) => {
+      const audio = audioRef.current;
+      if (!audio) return;
+      audio.currentTime = Math.max(0, audio.currentTime - (details.seekOffset || 10));
+    });
+    setHandler("seekforward", (details) => {
+      const audio = audioRef.current;
+      if (!audio) return;
+      audio.currentTime = Math.min(
+        audio.duration || Infinity,
+        audio.currentTime + (details.seekOffset || 10)
+      );
+    });
+    setHandler("seekto", (details) => {
+      const audio = audioRef.current;
+      if (audio && details.seekTime != null) audio.currentTime = details.seekTime;
+    });
+
+    return () => {
+      ["play", "pause", "previoustrack", "nexttrack", "seekbackward", "seekforward", "seekto"].forEach(
+        (action) => setHandler(action, null)
+      );
+    };
+  });
+
+  // ---------- Keyboard shortcuts ----------
+  // Space: play/pause · ←/→: seek 5s · ↑/↓: volume · N/P: next/prev track.
+  // Ignored while typing in any text field, and while modifier keys are
+  // held (so browser/OS shortcuts still work normally).
+  useEffect(() => {
+    const onKeyDown = (e) => {
+      const active = document.activeElement;
+      const tag = active?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || active?.isContentEditable) return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+
+      const audio = audioRef.current;
+      switch (e.key) {
+        case " ":
+        case "Spacebar":
+          e.preventDefault();
+          togglePlayPause();
+          break;
+        case "ArrowRight":
+          if (audio) audio.currentTime = Math.min(audio.duration || Infinity, audio.currentTime + 5);
+          break;
+        case "ArrowLeft":
+          if (audio) audio.currentTime = Math.max(0, audio.currentTime - 5);
+          break;
+        case "ArrowUp": {
+          e.preventDefault();
+          setVolume((v) => Math.min(1, Math.round((v + 0.05) * 100) / 100));
+          break;
+        }
+        case "ArrowDown": {
+          e.preventDefault();
+          setVolume((v) => Math.max(0, Math.round((v - 0.05) * 100) / 100));
+          break;
+        }
+        case "n":
+        case "N":
+          handleNext();
+          break;
+        case "p":
+        case "P":
+          handlePrev();
+          break;
+        default:
+          break;
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  });
+
   // Purely presentational: let the parent know the playing track changed
   // (new song, next/prev, autoplay chain, playlist switch, search pick)
   // so it can swap the full-screen background photo. Doesn't read or
@@ -659,6 +944,15 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
   const handleStreamFailure = (message) => {
     setIsPlaying(false);
 
+    // Offline is almost certainly the real reason a stream just failed to
+    // resolve — say so plainly instead of a generic/misleading message.
+    if (!isOnline) {
+      const offlineMsg = "You're offline — playback paused.";
+      setPlaybackError(offlineMsg);
+      pushToast(offlineMsg, "warning");
+      return;
+    }
+
     // "Sign in to confirm you're not a bot" / cookie-required failures are a
     // config problem, not a bad track — every track will fail the same way,
     // so skipping through the whole playlist just burns yt-dlp calls and
@@ -666,18 +960,22 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
     // and stop, rather than auto-advancing.
     if (message && /cookie|sign in to confirm/i.test(message)) {
       setPlaybackError(message);
+      pushToast(message, "error", 6500);
       return;
     }
 
     consecutiveFailures.current += 1;
     if (consecutiveFailures.current > 3) {
-      setPlaybackError(
-        "Several tracks in a row failed to stream. The backend (yt-dlp) is likely blocked or down."
-      );
+      const stopMsg =
+        "Several tracks in a row failed to stream. The backend (yt-dlp) is likely blocked or down.";
+      setPlaybackError(stopMsg);
+      pushToast(stopMsg, "error", 6500);
       return;
     }
 
-    setPlaybackError(message || "Couldn't play this track — skipping…");
+    const skipMsg = message || "Couldn't play this track — skipping…";
+    setPlaybackError(skipMsg);
+    pushToast(skipMsg, "error");
     if (activeSource === "playlist" && playlist && playlist.tracks.length > 1) {
       setTimeout(() => handleNext(), 1200);
     }
@@ -915,12 +1213,53 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
     if (audioRef.current) audioRef.current.volume = value;
   };
 
+  const lastPositionStateRef = useRef(0);
+
   const handleTimeUpdate = () => {
-    if (audioRef.current) setCurrentTime(audioRef.current.currentTime);
+    const audio = audioRef.current;
+    if (!audio) return;
+    setCurrentTime(audio.currentTime);
+
+    // Keep the lock-screen / notification scrubber in sync — throttled so
+    // we're not calling this on every ~250ms timeupdate tick.
+    if ("mediaSession" in navigator && audio.duration && Number.isFinite(audio.duration)) {
+      const now = Date.now();
+      if (now - lastPositionStateRef.current > 900) {
+        lastPositionStateRef.current = now;
+        try {
+          navigator.mediaSession.setPositionState({
+            duration: audio.duration,
+            playbackRate: audio.playbackRate || 1,
+            position: Math.min(audio.currentTime, audio.duration),
+          });
+        } catch (err) {
+          // Not supported in this browser — harmless to skip.
+        }
+      }
+    }
   };
 
   const handleLoadedMetadata = () => {
-    if (audioRef.current) setDuration(audioRef.current.duration || 0);
+    const audio = audioRef.current;
+    if (!audio) return;
+    setDuration(audio.duration || 0);
+
+    // Resume playback position — only ever applied once per page load, and
+    // only to the exact track that was saved (matched by id), so switching
+    // tracks afterward never unexpectedly jumps the seek bar.
+    const saved = initialPlaybackStateRef.current;
+    if (
+      !resumeTimeAppliedRef.current &&
+      saved &&
+      saved.trackId &&
+      currentTrack?.id === saved.trackId &&
+      saved.currentTime > 2 &&
+      saved.currentTime < audio.duration
+    ) {
+      resumeTimeAppliedRef.current = true;
+      audio.currentTime = saved.currentTime;
+      setCurrentTime(saved.currentTime);
+    }
   };
 
   const clearSearch = () => {
@@ -1343,6 +1682,13 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
           upward, above the compact bar, instead of pushing the bar
           off-screen. */}
       <div className="player-dock">
+        {!isOnline && (
+          <div className="offline-banner" role="status">
+            <OfflineIcon />
+            You're offline — playback may be interrupted
+          </div>
+        )}
+
         {loading && (
           <div className="state-card state-card--inline">
             <span className="state-disc" aria-hidden="true" />
@@ -1574,6 +1920,29 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
               </>
             )}
           </div>
+        </div>
+      )}
+
+      {/* ---------- Toasts ----------
+          Small, auto-dismissing notifications for stream/playlist/search
+          errors and network status changes — fixed on top of everything
+          else so they're visible regardless of which player state or
+          modal is currently showing. */}
+      {toasts.length > 0 && (
+        <div className="toast-stack" role="status" aria-live="polite">
+          {toasts.map((t) => (
+            <div key={t.id} className={`toast toast--${t.type}`}>
+              <span className="toast-message">{t.message}</span>
+              <button
+                type="button"
+                className="toast-dismiss"
+                onClick={() => dismissToast(t.id)}
+                aria-label="Dismiss notification"
+              >
+                &times;
+              </button>
+            </div>
+          ))}
         </div>
       )}
     </div>
