@@ -20,29 +20,75 @@ const CROSSFADE_MS = 1500;
 // `durationMs`, driven by requestAnimationFrame. `rafRef` is a ref used to
 // track/cancel the in-flight ramp so a new one (e.g. a rapid track skip)
 // doesn't fight with a previous one still running.
+//
+// IMPORTANT (background-tab fix): browsers throttle/suspend
+// requestAnimationFrame almost entirely once a tab is backgrounded (mobile
+// browsers do this even more aggressively than desktop). Since every track
+// change fades the new track in from volume 0 (see the crossfade logic
+// below), a ramp that starts — or is still running — while the tab is
+// hidden would get stuck partway (often stuck at 0), so the track plays but
+// stays silent until the user switches back to the tab. To guarantee audio
+// is always audible regardless of tab visibility, this now:
+//   1. Skips the animation entirely and jumps straight to the target volume
+//      if the tab is already hidden when the ramp is requested.
+//   2. Listens for the tab being hidden mid-ramp and immediately snaps to
+//      the target volume instead of leaving it stranded.
 const rampAudioVolume = (el, from, to, durationMs, rafRef, onDone) => {
   if (!el) return;
   if (rafRef.current) cancelAnimationFrame(rafRef.current);
-  const start = performance.now();
   const clamp = (v) => Math.min(1, Math.max(0, v));
+
+  const finish = () => {
+    try {
+      el.volume = clamp(to);
+    } catch (err) {
+      // Element may already be detached/gone — nothing to finish.
+    }
+    if (onDone) onDone();
+  };
+
+  // Tab is already backgrounded — rAF won't reliably run, so don't even
+  // start the animation; just apply the end volume immediately so the
+  // track is audible right away.
+  if (typeof document !== "undefined" && document.hidden) {
+    finish();
+    return;
+  }
+
+  const start = performance.now();
   try {
     el.volume = clamp(from);
   } catch (err) {
     // Element may already be detached/gone — nothing to animate.
     return;
   }
+
+  const onVisibilityChange = () => {
+    if (document.hidden) {
+      // Tab got backgrounded mid-fade — stop waiting on rAF and snap
+      // straight to the target volume so sound doesn't get stuck silent.
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      finish();
+    }
+  };
+  document.addEventListener("visibilitychange", onVisibilityChange);
+
   const step = (now) => {
     const t = Math.min(1, (now - start) / durationMs);
     try {
       el.volume = clamp(from + (to - from) * t);
     } catch (err) {
       rafRef.current = null;
+      document.removeEventListener("visibilitychange", onVisibilityChange);
       return;
     }
     if (t < 1) {
       rafRef.current = requestAnimationFrame(step);
     } else {
       rafRef.current = null;
+      document.removeEventListener("visibilitychange", onVisibilityChange);
       if (onDone) onDone();
     }
   };
