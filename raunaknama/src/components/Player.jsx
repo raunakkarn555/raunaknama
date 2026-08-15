@@ -281,6 +281,44 @@ const HistoryIcon = () => (
   </svg>
 );
 
+// Lyrics — mic icon, used on the "Lyrics" toggle button and empty/loading
+// states inside the lyrics panel.
+const MicIcon = ({ size = 16 }) => (
+  <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M12 15a3.5 3.5 0 0 0 3.5-3.5V6a3.5 3.5 0 0 0-7 0v5.5A3.5 3.5 0 0 0 12 15z" />
+    <path d="M6.5 11a5.5 5.5 0 0 0 11 0" />
+    <path d="M12 16.5V20" />
+    <path d="M9 20h6" />
+  </svg>
+);
+
+// LRC parser — turns a raw LRC blob (lines like "[01:23.45]Some lyric text",
+// with optional multiple timestamps per line) into a sorted, deduped array
+// of { time (seconds), text }. Lines with no timestamp — occasional stray
+// metadata like [ar:Artist] or [00:00.00] blank leaders — are ignored.
+const LRC_LINE_RE = /\[(\d{1,2}):(\d{2})(?:[.:](\d{1,3}))?\]/g;
+const parseLRC = (raw) => {
+  if (!raw || typeof raw !== "string") return [];
+  const lines = [];
+  for (const rawLine of raw.split(/\r?\n/)) {
+    LRC_LINE_RE.lastIndex = 0;
+    const timestamps = [];
+    let match;
+    while ((match = LRC_LINE_RE.exec(rawLine))) {
+      const mins = parseInt(match[1], 10);
+      const secs = parseInt(match[2], 10);
+      const frac = match[3] ? Number(`0.${match[3]}`) : 0;
+      timestamps.push(mins * 60 + secs + frac);
+    }
+    if (!timestamps.length) continue;
+    const text = rawLine.replace(LRC_LINE_RE, "").trim();
+    for (const time of timestamps) {
+      lines.push({ time, text });
+    }
+  }
+  return lines.sort((a, b) => a.time - b.time);
+};
+
 // --- Local (on-device) custom playlist storage ---
 // These playlists are created by the listener and saved ONLY in this
 // browser's localStorage — never sent to, or fetched from, the server.
@@ -456,6 +494,16 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
     return typeof saved === "number" && saved >= 0 && saved <= 1 ? saved : 1;
   });
   const [showQueue, setShowQueue] = useState(false);
+
+  // ---------- Lyrics (lrclib.net) ----------
+  // Plain, unsynchronised display only — just the words for whichever
+  // track is currently loaded. No timestamp tracking, no active-line
+  // highlighting, no auto-scroll tied to playback position.
+  const [showLyrics, setShowLyrics] = useState(false);
+  const [lyricsLoading, setLyricsLoading] = useState(false);
+  // { available, synced: [{time, text}] | null, plain: string | null }
+  const [lyricsData, setLyricsData] = useState(null);
+  const lyricsRequestIdRef = useRef(0);
 
   const [playbackError, setPlaybackError] = useState(null);
 
@@ -1158,6 +1206,52 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
       return next;
     });
   }, [currentTrack?.id]);
+
+  // ---------- Lyrics (lrclib.net) ----------
+  // Fetches synced/plain lyrics for whatever track is currently loaded, via
+  // /api/lyrics (which itself talks to lrclib.net). Re-fires whenever the
+  // track changes; a monotonically increasing request id guards against a
+  // slow, stale response from a previous track overwriting the lyrics for
+  // the one now playing (e.g. rapid next/prev taps).
+  useEffect(() => {
+    if (!currentTrack?.id || !currentTrack?.title) {
+      setLyricsData(null);
+      setLyricsLoading(false);
+      return;
+    }
+
+    const requestId = ++lyricsRequestIdRef.current;
+    setLyricsLoading(true);
+    setLyricsData(null);
+
+    const params = new URLSearchParams({ track: currentTrack.title });
+    if (currentTrack.channel) params.set("artist", currentTrack.channel);
+    if (currentTrack.duration) params.set("duration", String(Math.round(currentTrack.duration)));
+
+    fetch(`${API_BASE}/api/lyrics?${params.toString()}`)
+      .then((res) => res.json())
+      .then((data) => {
+        if (lyricsRequestIdRef.current !== requestId) return; // stale — a newer track has since loaded
+        if (!data || !data.available) {
+          setLyricsData({ available: false });
+          return;
+        }
+        setLyricsData({
+          available: true,
+          synced: data.synced ? parseLRC(data.synced) : [],
+          plain: data.plain || null,
+          instrumental: !!data.instrumental,
+        });
+      })
+      .catch((err) => {
+        if (lyricsRequestIdRef.current !== requestId) return;
+        console.error("Lyrics fetch error:", err);
+        setLyricsData({ available: false });
+      })
+      .finally(() => {
+        if (lyricsRequestIdRef.current === requestId) setLyricsLoading(false);
+      });
+  }, [currentTrack?.id, currentTrack?.title, currentTrack?.channel, currentTrack?.duration]);
 
   // ---------- Sleep timer ----------
   // Ticks the visible countdown once a second while a timer is running.
@@ -2253,6 +2347,16 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
               >
                 <SaveIcon />
               </button>
+              <button
+                type="button"
+                className={`add-to-playlist-btn add-to-playlist-btn--header lyrics-toggle-btn ${showLyrics ? "is-active" : ""}`}
+                aria-label={showLyrics ? "Hide lyrics" : "Show lyrics"}
+                aria-pressed={showLyrics}
+                title="Lyrics"
+                onClick={() => setShowLyrics((v) => !v)}
+              >
+                <MicIcon />
+              </button>
             </div>
           </div>
 
@@ -2549,6 +2653,71 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
               </button>
             </div>
           </form>
+        </div>
+      )}
+
+      {showLyrics && currentTrack && (
+        <div className="lyrics-modal-overlay" onMouseDown={() => setShowLyrics(false)}>
+          <div className="lyrics-modal" onMouseDown={(e) => e.stopPropagation()}>
+            <div className="lyrics-modal-head">
+              <div className="lyrics-modal-head-text">
+                <span className="lyrics-modal-eyebrow">
+                  <MicIcon size={13} /> Lyrics
+                </span>
+                <h3 className="lyrics-modal-title line-clamp-2">{currentTrack.title}</h3>
+              </div>
+              <button
+                type="button"
+                className="lyrics-modal-close"
+                aria-label="Close lyrics"
+                onClick={() => setShowLyrics(false)}
+              >
+                <CloseIcon />
+              </button>
+            </div>
+
+            <div className="lyrics-modal-body">
+              {lyricsLoading && (
+                <div className="lyrics-state">
+                  <LoadingSpinnerIcon size={26} />
+                  <p>Fetching lyrics&hellip;</p>
+                </div>
+              )}
+
+              {!lyricsLoading && lyricsData && !lyricsData.available && (
+                <div className="lyrics-state lyrics-state--empty">
+                  <MicIcon size={26} />
+                  <p>Lyrics not available for this track.</p>
+                </div>
+              )}
+
+              {!lyricsLoading && lyricsData?.available && lyricsData.instrumental && (
+                <div className="lyrics-state lyrics-state--empty">
+                  <MicIcon size={26} />
+                  <p>This track is instrumental — no lyrics to show.</p>
+                </div>
+              )}
+
+              {!lyricsLoading && lyricsData?.available && !lyricsData.instrumental && (
+                <div className="lyrics-plain">
+                  {/* Plain, unsynchronised lyrics only — just the words for this
+                      track, no timestamp tracking or active-line highlighting.
+                      Prefer lrclib's plain-text lyrics; if only synced (timed)
+                      lyrics came back, strip the timing and show the text. */}
+                  {(lyricsData.plain
+                    ? lyricsData.plain.split(/\r?\n/)
+                    : (lyricsData.synced || []).map((l) => l.text).filter(Boolean)
+                  ).map((line, idx) => (
+                    <p key={idx} className="lyrics-line">
+                      {line || "\u00A0"}
+                    </p>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <p className="lyrics-modal-footer">Lyrics via lrclib.net</p>
+          </div>
         </div>
       )}
 
