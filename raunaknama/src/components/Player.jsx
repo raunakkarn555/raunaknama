@@ -238,6 +238,49 @@ const OfflineIcon = () => (
   </svg>
 );
 
+// --- Icons for like/favorite, sleep timer, "surprise me", and history ---
+
+const HeartIcon = ({ filled }) => (
+  <svg
+    viewBox="0 0 24 24"
+    width="14"
+    height="14"
+    fill={filled ? "currentColor" : "none"}
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
+    <path d="M12 21s-7.5-4.6-10-9.3C.6 8.4 2.3 5 5.7 5c2 0 3.4 1.1 4.3 2.4C10.9 6.1 12.3 5 14.3 5c3.4 0 5.1 3.4 3.7 6.7C19.5 16.4 12 21 12 21z" />
+  </svg>
+);
+
+const MoonIcon = () => (
+  <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8z" />
+  </svg>
+);
+
+const DiceIcon = () => (
+  <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <rect x="3" y="3" width="18" height="18" rx="4" />
+    <circle cx="8" cy="8" r="1.2" fill="currentColor" stroke="none" />
+    <circle cx="16" cy="8" r="1.2" fill="currentColor" stroke="none" />
+    <circle cx="12" cy="12" r="1.2" fill="currentColor" stroke="none" />
+    <circle cx="8" cy="16" r="1.2" fill="currentColor" stroke="none" />
+    <circle cx="16" cy="16" r="1.2" fill="currentColor" stroke="none" />
+  </svg>
+);
+
+const HistoryIcon = () => (
+  <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M3 12a9 9 0 1 0 3-6.7" />
+    <path d="M3 4v5h5" />
+    <path d="M12 7v5l4 2" />
+  </svg>
+);
+
 // --- Local (on-device) custom playlist storage ---
 // These playlists are created by the listener and saved ONLY in this
 // browser's localStorage — never sent to, or fetched from, the server.
@@ -263,6 +306,82 @@ const persistLocalPlaylists = (list) => {
     console.warn("Could not save local playlists to this device's storage:", err);
   }
 };
+
+// --- Liked / favorited tracks ---
+// A simple heart-icon favorites list, saved only on this device
+// (localStorage) — same pattern as the local custom playlists above.
+const LOCAL_LIKES_STORAGE_KEY = "raunaknama_liked_tracks_v1";
+
+const loadLikedTracks = () => {
+  try {
+    const raw = window.localStorage.getItem(LOCAL_LIKES_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (err) {
+    console.warn("Could not read liked songs from this device's storage:", err);
+    return [];
+  }
+};
+
+const persistLikedTracks = (list) => {
+  try {
+    window.localStorage.setItem(LOCAL_LIKES_STORAGE_KEY, JSON.stringify(list));
+  } catch (err) {
+    console.warn("Could not save liked songs to this device's storage:", err);
+  }
+};
+
+// --- Recently played ---
+// Auto-tracked, most-recent-first list of what's actually been played this
+// device, so a search result you played is still reachable after search
+// results themselves disappear (e.g. after navigating away / clearing the
+// search box). Saved only on this device (localStorage).
+const RECENTLY_PLAYED_STORAGE_KEY = "raunaknama_recently_played_v1";
+const MAX_RECENTLY_PLAYED = 30;
+
+const loadRecentlyPlayed = () => {
+  try {
+    const raw = window.localStorage.getItem(RECENTLY_PLAYED_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (err) {
+    console.warn("Could not read recently played from this device's storage:", err);
+    return [];
+  }
+};
+
+const persistRecentlyPlayed = (list) => {
+  try {
+    window.localStorage.setItem(RECENTLY_PLAYED_STORAGE_KEY, JSON.stringify(list));
+  } catch (err) {
+    console.warn("Could not save recently played to this device's storage:", err);
+  }
+};
+
+// --- "Surprise me" ---
+// A one-tap random pick — biased toward the same late-night / moody
+// listening vibe as the app's own footer taglines, rather than a fully
+// blind random query.
+const SURPRISE_ME_QUERIES = [
+  "lofi chill songs",
+  "late night acoustic songs",
+  "romantic bollywood songs",
+  "sad songs playlist",
+  "indie feel good songs",
+  "monsoon songs",
+  "old bollywood classics",
+  "instrumental relaxing music",
+  "soulful unplugged songs",
+  "90s bollywood hits",
+  "chill vibes songs",
+  "rainy day songs",
+  "late night drive songs",
+  "soft rock love songs",
+];
+
+// --- Sleep timer ---
+// Preset "stop after…" slots offered alongside the custom minutes input.
+const SLEEP_TIMER_PRESETS_MIN = [15, 30, 45, 60];
 
 // --- Resume playback position ---
 // Remembers which playlist/track (or search pick) was playing and exactly
@@ -393,6 +512,24 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
   const [newPlaylistName, setNewPlaylistName] = useState("");
   const [addToPlaylistTrack, setAddToPlaylistTrack] = useState(null); // track object currently being saved
   const [addToPlaylistFeedback, setAddToPlaylistFeedback] = useState("");
+
+  // Liked/favorited tracks — heart icon, saved only on this device.
+  const [likedTracks, setLikedTracks] = useState(() => loadLikedTracks());
+  const [showLikedSongs, setShowLikedSongs] = useState(false);
+
+  // Recently played — auto-tracked, saved only on this device.
+  const [recentlyPlayed, setRecentlyPlayed] = useState(() => loadRecentlyPlayed());
+  const [showRecentlyPlayed, setShowRecentlyPlayed] = useState(false);
+
+  // "Surprise me" — one-tap random track.
+  const [isSurpriseLoading, setIsSurpriseLoading] = useState(false);
+
+  // Sleep timer — "stop after N min", with presets and a custom time.
+  const [sleepTimerEndAt, setSleepTimerEndAt] = useState(null);
+  const [sleepTimerRemainingSecs, setSleepTimerRemainingSecs] = useState(0);
+  const [showSleepTimerModal, setShowSleepTimerModal] = useState(false);
+  const [customSleepMinutes, setCustomSleepMinutes] = useState("");
+  const sleepTimerTimeoutRef = useRef(null);
 
   const audioRef = useRef(null);
   // ---------- Crossfade ----------
@@ -999,6 +1136,48 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
     }
   }, [currentTrack?.id, onTrackChange]);
 
+  // ---------- Recently played ----------
+  // Auto-tracks whatever is currently loaded (playlist track or search
+  // pick) into a most-recent-first, deduped, capped list on this device —
+  // so a track played from search is still reachable after the search
+  // results themselves are gone.
+  useEffect(() => {
+    if (!currentTrack?.id) return;
+    setRecentlyPlayed((prev) => {
+      const entry = {
+        id: currentTrack.id,
+        title: currentTrack.title,
+        channel: currentTrack.channel || null,
+        playedAt: Date.now(),
+      };
+      const next = [entry, ...prev.filter((t) => t.id !== currentTrack.id)].slice(
+        0,
+        MAX_RECENTLY_PLAYED
+      );
+      persistRecentlyPlayed(next);
+      return next;
+    });
+  }, [currentTrack?.id]);
+
+  // ---------- Sleep timer ----------
+  // Ticks the visible countdown once a second while a timer is running.
+  useEffect(() => {
+    if (!sleepTimerEndAt) return;
+    const tick = () => {
+      setSleepTimerRemainingSecs(Math.max(0, Math.round((sleepTimerEndAt - Date.now()) / 1000)));
+    };
+    tick();
+    const intervalId = setInterval(tick, 1000);
+    return () => clearInterval(intervalId);
+  }, [sleepTimerEndAt]);
+
+  // Never let a pending sleep timer keep firing after the component unmounts.
+  useEffect(() => {
+    return () => {
+      if (sleepTimerTimeoutRef.current) clearTimeout(sleepTimerTimeoutRef.current);
+    };
+  }, []);
+
   // 4. Playback Controls
   const handleNext = () => {
     if (!playlist) return;
@@ -1319,6 +1498,109 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
     setActiveSource("search");
     setIsPlaying(true);
   };
+
+  // Plays a minimal stored track object (from Liked Songs or Recently
+  // Played) the same way a search pick plays — resolveStream() only needs
+  // the track id, so this works regardless of where the track originally
+  // came from.
+  const playStoredTrack = (track) => {
+    if (!track) return;
+    setSearchTrack(track);
+    setActiveSource("search");
+    setIsPlaying(true);
+  };
+
+  // ---------- Like / favorite ----------
+  const isTrackLiked = useCallback(
+    (trackId) => likedTracks.some((t) => t.id === trackId),
+    [likedTracks]
+  );
+
+  const toggleLikeTrack = useCallback((track) => {
+    if (!track || !track.id) return;
+    setLikedTracks((prev) => {
+      const alreadyLiked = prev.some((t) => t.id === track.id);
+      const next = alreadyLiked
+        ? prev.filter((t) => t.id !== track.id)
+        : [
+            { id: track.id, title: track.title, channel: track.channel || null },
+            ...prev,
+          ];
+      persistLikedTracks(next);
+      return next;
+    });
+  }, []);
+
+  // ---------- Sleep timer ----------
+  const clearSleepTimer = useCallback((notify = false) => {
+    if (sleepTimerTimeoutRef.current) {
+      clearTimeout(sleepTimerTimeoutRef.current);
+      sleepTimerTimeoutRef.current = null;
+    }
+    setSleepTimerEndAt(null);
+    setSleepTimerRemainingSecs(0);
+    if (notify) pushToast("Sleep timer cancelled.", "success", 2500);
+  }, [pushToast]);
+
+  const startSleepTimer = useCallback(
+    (minutes) => {
+      const mins = Number(minutes);
+      if (!mins || mins <= 0) return;
+      if (sleepTimerTimeoutRef.current) clearTimeout(sleepTimerTimeoutRef.current);
+
+      const endAt = Date.now() + mins * 60 * 1000;
+      setSleepTimerEndAt(endAt);
+      setSleepTimerRemainingSecs(mins * 60);
+
+      sleepTimerTimeoutRef.current = setTimeout(() => {
+        const audio = audioRef.current;
+        if (audio) audio.pause();
+        setIsPlaying(false);
+        pushToast("Sleep timer ended — playback paused.", "success", 4500);
+        sleepTimerTimeoutRef.current = null;
+        setSleepTimerEndAt(null);
+        setSleepTimerRemainingSecs(0);
+      }, mins * 60 * 1000);
+
+      setShowSleepTimerModal(false);
+      setCustomSleepMinutes("");
+      pushToast(`Sleep timer set — stopping in ${mins} min.`, "success", 3000);
+    },
+    [pushToast]
+  );
+
+  const handleCustomSleepTimerSubmit = (e) => {
+    e.preventDefault();
+    startSleepTimer(customSleepMinutes);
+  };
+
+  // ---------- "Surprise me" ----------
+  // One-tap random track, drawn from a rotating pool of mood/vibe queries
+  // so a pick always fits the same late-night listening feel as the rest
+  // of the app, instead of being fully arbitrary.
+  const handleSurpriseMe = useCallback(() => {
+    triggerHaptic();
+    setIsSurpriseLoading(true);
+    const q = SURPRISE_ME_QUERIES[Math.floor(Math.random() * SURPRISE_ME_QUERIES.length)];
+    fetch(`${API_BASE}/api/search?q=${encodeURIComponent(q)}`)
+      .then((res) => res.json())
+      .then((data) => {
+        const results = data.results || [];
+        if (!results.length) {
+          pushToast("Couldn't find a surprise pick — try again.", "error");
+          return;
+        }
+        const pick = results[Math.floor(Math.random() * results.length)];
+        setSearchTrack(pick);
+        setActiveSource("search");
+        setIsPlaying(true);
+      })
+      .catch((err) => {
+        console.error("Surprise me error:", err);
+        pushToast("Surprise pick failed — try again.", "error");
+      })
+      .finally(() => setIsSurpriseLoading(false));
+  }, [pushToast]);
 
   const handleSeek = (e) => {
     const value = Number(e.target.value);
@@ -1643,36 +1925,126 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
                         {isSelected ? (isPlaying ? "♪" : "❚❚") : idx + 1}
                       </span>
                       <span className="queue-item-title line-clamp-2">{track.title}</span>
-                      {isActivePlaylistLocal ? (
+                      <span className="queue-item-actions">
                         <span
                           className="queue-item-action"
                           role="button"
-                          aria-label={`Remove ${track.title} from this playlist`}
-                          title="Remove from this playlist"
-                          onClick={(e) => handleRemoveTrackFromLocalPlaylist(track.id, e)}
-                        >
-                          <TrashIcon />
-                        </span>
-                      ) : (
-                        <span
-                          className="queue-item-action"
-                          role="button"
-                          aria-label={`Save ${track.title} to a playlist`}
-                          title="Save to playlist (on this device)"
+                          aria-label={isTrackLiked(track.id) ? `Unlike ${track.title}` : `Like ${track.title}`}
+                          title={isTrackLiked(track.id) ? "Remove from Liked Songs" : "Add to Liked Songs"}
                           onClick={(e) => {
                             e.stopPropagation();
-                            openAddToPlaylistPicker(track);
+                            toggleLikeTrack(track);
                           }}
                         >
-                          <PlusIcon />
+                          <HeartIcon filled={isTrackLiked(track.id)} />
                         </span>
-                      )}
+                        {isActivePlaylistLocal ? (
+                          <span
+                            className="queue-item-action"
+                            role="button"
+                            aria-label={`Remove ${track.title} from this playlist`}
+                            title="Remove from this playlist"
+                            onClick={(e) => handleRemoveTrackFromLocalPlaylist(track.id, e)}
+                          >
+                            <TrashIcon />
+                          </span>
+                        ) : (
+                          <span
+                            className="queue-item-action"
+                            role="button"
+                            aria-label={`Save ${track.title} to a playlist`}
+                            title="Save to playlist (on this device)"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              openAddToPlaylistPicker(track);
+                            }}
+                          >
+                            <PlusIcon />
+                          </span>
+                        )}
+                      </span>
                     </div>
                   );
                 })}
               </div>
             </div>
           )}
+
+          <div className="drawer-section queue-drawer-section">
+            <button
+              type="button"
+              className="queue-toggle drawer-queue-toggle"
+              onClick={() => setShowLikedSongs((s) => !s)}
+              aria-expanded={showLikedSongs}
+            >
+              <span className="drawer-section-label queue-drawer-label">
+                <HeartIcon filled /> Liked Songs &middot; {likedTracks.length}
+              </span>
+              <ChevronIcon open={showLikedSongs} />
+            </button>
+            <div className={`queue-list drawer-queue-list custom-scrollbar ${showLikedSongs ? "is-open" : ""}`}>
+              {likedTracks.length === 0 && (
+                <p className="playlist-modal-empty">No liked songs yet — tap the heart on any track.</p>
+              )}
+              {likedTracks.map((track) => (
+                <div key={track.id} className="queue-item" onClick={() => playStoredTrack(track)}>
+                  <span className="queue-item-index" aria-hidden="true">
+                    <HeartIcon filled />
+                  </span>
+                  <span className="queue-item-title line-clamp-2">{track.title}</span>
+                  <span
+                    className="queue-item-action"
+                    role="button"
+                    aria-label={`Unlike ${track.title}`}
+                    title="Remove from Liked Songs"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      toggleLikeTrack(track);
+                    }}
+                  >
+                    <TrashIcon />
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="drawer-section queue-drawer-section">
+            <button
+              type="button"
+              className="queue-toggle drawer-queue-toggle"
+              onClick={() => setShowRecentlyPlayed((s) => !s)}
+              aria-expanded={showRecentlyPlayed}
+            >
+              <span className="drawer-section-label queue-drawer-label">
+                <HistoryIcon /> Recently Played &middot; {recentlyPlayed.length}
+              </span>
+              <ChevronIcon open={showRecentlyPlayed} />
+            </button>
+            <div className={`queue-list drawer-queue-list custom-scrollbar ${showRecentlyPlayed ? "is-open" : ""}`}>
+              {recentlyPlayed.length === 0 && (
+                <p className="playlist-modal-empty">Nothing played yet this session.</p>
+              )}
+              {recentlyPlayed.map((track, idx) => (
+                <div key={`${track.id}-${idx}`} className="queue-item" onClick={() => playStoredTrack(track)}>
+                  <span className="queue-item-index">{idx + 1}</span>
+                  <span className="queue-item-title line-clamp-2">{track.title}</span>
+                  <span
+                    className="queue-item-action"
+                    role="button"
+                    aria-label={isTrackLiked(track.id) ? `Unlike ${track.title}` : `Like ${track.title}`}
+                    title={isTrackLiked(track.id) ? "Remove from Liked Songs" : "Add to Liked Songs"}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      toggleLikeTrack(track);
+                    }}
+                  >
+                    <HeartIcon filled={isTrackLiked(track.id)} />
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
 
           <div className="drawer-section local-playlists-block">
             <p className="drawer-section-label">Your playlists</p>
@@ -1754,6 +2126,17 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
               <CloseIcon />
             </button>
           )}
+          <button
+            type="button"
+            className={`surprise-me-btn ${isSurpriseLoading ? "is-loading" : ""}`}
+            onClick={handleSurpriseMe}
+            disabled={isSurpriseLoading}
+            aria-label="Surprise me with a random track"
+            title="Surprise me — one-tap random track"
+          >
+            {isSurpriseLoading ? <LoadingSpinnerIcon size={14} /> : <DiceIcon />}
+            <span className="surprise-me-label">Surprise me</span>
+          </button>
         </div>
 
         {showResultsDropdown && (
@@ -1773,19 +2156,34 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
                     <span className="search-result-title line-clamp-2">{track.title}</span>
                     {track.channel && <span className="search-result-channel">{track.channel}</span>}
                   </div>
-                  <button
-                    type="button"
-                    className="add-to-playlist-btn"
-                    aria-label={`Save ${track.title} to a playlist`}
-                    title="Save to playlist (on this device)"
-                    onMouseDown={(e) => {
-                      e.stopPropagation();
-                      e.preventDefault();
-                      openAddToPlaylistPicker(track);
-                    }}
-                  >
-                    <PlusIcon />
-                  </button>
+                  <div className="search-result-actions">
+                    <button
+                      type="button"
+                      className={`add-to-playlist-btn like-btn ${isTrackLiked(track.id) ? "is-liked" : ""}`}
+                      aria-label={isTrackLiked(track.id) ? `Unlike ${track.title}` : `Like ${track.title}`}
+                      title={isTrackLiked(track.id) ? "Remove from Liked Songs" : "Add to Liked Songs"}
+                      onMouseDown={(e) => {
+                        e.stopPropagation();
+                        e.preventDefault();
+                        toggleLikeTrack(track);
+                      }}
+                    >
+                      <HeartIcon filled={isTrackLiked(track.id)} />
+                    </button>
+                    <button
+                      type="button"
+                      className="add-to-playlist-btn"
+                      aria-label={`Save ${track.title} to a playlist`}
+                      title="Save to playlist (on this device)"
+                      onMouseDown={(e) => {
+                        e.stopPropagation();
+                        e.preventDefault();
+                        openAddToPlaylistPicker(track);
+                      }}
+                    >
+                      <PlusIcon />
+                    </button>
+                  </div>
                 </div>
               ))}
           </div>
@@ -1836,15 +2234,26 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
                 {activeSource === "search" ? "Custom pick" : playlist?.playlistTitle}
               </h2>
             </div>
-            <button
-              type="button"
-              className="add-to-playlist-btn add-to-playlist-btn--header"
-              aria-label={`Save ${currentTrack.title} to a playlist`}
-              title="Save to playlist (on this device)"
-              onClick={() => openAddToPlaylistPicker(currentTrack)}
-            >
-              <SaveIcon />
-            </button>
+            <div className="now-playing-head-actions">
+              <button
+                type="button"
+                className={`add-to-playlist-btn add-to-playlist-btn--header like-btn ${isTrackLiked(currentTrack.id) ? "is-liked" : ""}`}
+                aria-label={isTrackLiked(currentTrack.id) ? `Unlike ${currentTrack.title}` : `Like ${currentTrack.title}`}
+                title={isTrackLiked(currentTrack.id) ? "Remove from Liked Songs" : "Add to Liked Songs"}
+                onClick={() => toggleLikeTrack(currentTrack)}
+              >
+                <HeartIcon filled={isTrackLiked(currentTrack.id)} />
+              </button>
+              <button
+                type="button"
+                className="add-to-playlist-btn add-to-playlist-btn--header"
+                aria-label={`Save ${currentTrack.title} to a playlist`}
+                title="Save to playlist (on this device)"
+                onClick={() => openAddToPlaylistPicker(currentTrack)}
+              >
+                <SaveIcon />
+              </button>
+            </div>
           </div>
 
           <div className="orb-stage">
@@ -1971,7 +2380,21 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
               >
                 <AutoplayIcon />
               </button>
+              <button
+                className={`ctrl-btn sleep-timer-btn ${sleepTimerEndAt ? "is-active" : ""}`}
+                onClick={() => setShowSleepTimerModal(true)}
+                aria-label={sleepTimerEndAt ? `Sleep timer — ${formatTime(sleepTimerRemainingSecs)} left` : "Set sleep timer"}
+                aria-pressed={!!sleepTimerEndAt}
+                title={sleepTimerEndAt ? `Stops in ${formatTime(sleepTimerRemainingSecs)}` : "Sleep timer"}
+              >
+                <MoonIcon />
+              </button>
             </div>
+            {sleepTimerEndAt && (
+              <p className="sleep-timer-note" role="status">
+                <MoonIcon /> Stopping in {formatTime(sleepTimerRemainingSecs)}
+              </p>
+            )}
           </div>
           </>
         )}
@@ -2053,6 +2476,79 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
               </>
             )}
           </div>
+        </div>
+      )}
+
+      {showSleepTimerModal && (
+        <div className="playlist-modal-overlay" onMouseDown={() => setShowSleepTimerModal(false)}>
+          <form
+            className="playlist-modal"
+            onMouseDown={(e) => e.stopPropagation()}
+            onSubmit={handleCustomSleepTimerSubmit}
+          >
+            <h3 className="playlist-modal-title">Sleep timer</h3>
+            <p className="playlist-modal-sub">
+              <MoonIcon /> Stop playback after a set time — pick a slot or set a custom one.
+            </p>
+
+            <div className="sleep-timer-presets">
+              {SLEEP_TIMER_PRESETS_MIN.map((mins) => (
+                <button
+                  key={mins}
+                  type="button"
+                  className="sleep-timer-preset-btn"
+                  onClick={() => startSleepTimer(mins)}
+                >
+                  {mins} min
+                </button>
+              ))}
+            </div>
+
+            <div className="sleep-timer-custom-row">
+              <input
+                type="number"
+                min="1"
+                max="600"
+                inputMode="numeric"
+                className="playlist-modal-input sleep-timer-custom-input"
+                placeholder="Custom minutes&hellip;"
+                value={customSleepMinutes}
+                onChange={(e) => setCustomSleepMinutes(e.target.value)}
+              />
+              <button
+                type="submit"
+                className="playlist-modal-btn playlist-modal-btn--primary"
+                disabled={!customSleepMinutes || Number(customSleepMinutes) <= 0}
+              >
+                Set
+              </button>
+            </div>
+
+            {sleepTimerEndAt && (
+              <p className="playlist-modal-feedback">
+                Stopping in {formatTime(sleepTimerRemainingSecs)}
+              </p>
+            )}
+
+            <div className="playlist-modal-actions">
+              {sleepTimerEndAt && (
+                <button
+                  type="button"
+                  className="playlist-modal-btn playlist-modal-btn--ghost"
+                  onClick={() => clearSleepTimer(true)}
+                >
+                  Cancel timer
+                </button>
+              )}
+              <button
+                type="button"
+                className="playlist-modal-btn playlist-modal-btn--ghost"
+                onClick={() => setShowSleepTimerModal(false)}
+              >
+                Close
+              </button>
+            </div>
+          </form>
         </div>
       )}
 
