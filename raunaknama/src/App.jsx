@@ -52,6 +52,48 @@ const nextTaglineDelay = () =>
   FOOTER_TAGLINE_INTERVAL_MIN_MS +
   Math.random() * (FOOTER_TAGLINE_INTERVAL_MAX_MS - FOOTER_TAGLINE_INTERVAL_MIN_MS);
 
+// ---------- Dynamic color theming ----------
+// Samples the dominant color out of the currently-showing backdrop photo
+// (the closest thing this app has to per-track "album art" — see the
+// photo-bg rotation below) via a tiny offscreen canvas, then hands it back
+// as an { r, g, b } average. Local/same-origin images only, so no CORS
+// headaches. Resolves to null on any failure — callers just keep whatever
+// accent color (or the static gold/red default) was already showing.
+const extractDominantColor = (imgSrc) =>
+  new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const size = 24;
+        const canvas = document.createElement('canvas');
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, size, size);
+        const { data } = ctx.getImageData(0, 0, size, size);
+        let r = 0;
+        let g = 0;
+        let b = 0;
+        let count = 0;
+        for (let i = 0; i < data.length; i += 4) {
+          r += data[i];
+          g += data[i + 1];
+          b += data[i + 2];
+          count += 1;
+        }
+        resolve({
+          r: Math.round(r / count),
+          g: Math.round(g / count),
+          b: Math.round(b / count),
+        });
+      } catch (err) {
+        resolve(null);
+      }
+    };
+    img.onerror = () => resolve(null);
+    img.src = imgSrc;
+  });
+
 // Rotating, fading footer tagline — cycles through FOOTER_TAGLINES on a
 // randomized 20–25s interval, purely fading (no directional motion) between
 // lines.
@@ -209,6 +251,33 @@ function App() {
   const advanceBackground = useCallback(() => {
     setBgIndex((prev) => (prev % totalBgPhotos) + 1);
   }, [totalBgPhotos]);
+
+  // Re-tint the player orb to match whichever backdrop photo is now
+  // showing, so every track feels a little visually distinct instead of
+  // the glow always being the same static gold/red. Sets CSS custom
+  // properties on the root element, which the orb's glow/accent styles
+  // read (with the static stripe colors as a fallback).
+  useEffect(() => {
+    let cancelled = false;
+    const src = isMobile ? `/bg/mobile/${bgIndex}.jpg` : `/bg/${bgIndex}.jpg`;
+    extractDominantColor(src).then((rgb) => {
+      if (cancelled || !rgb) return;
+      const { r, g, b } = rgb;
+      const soften = (c) => Math.min(255, Math.round(c + (255 - c) * 0.35));
+      document.documentElement.style.setProperty('--track-accent', `rgb(${r}, ${g}, ${b})`);
+      document.documentElement.style.setProperty(
+        '--track-accent-soft',
+        `rgb(${soften(r)}, ${soften(g)}, ${soften(b)})`
+      );
+      document.documentElement.style.setProperty(
+        '--track-accent-glow',
+        `rgba(${r}, ${g}, ${b}, 0.65)`
+      );
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [bgIndex, isMobile]);
 
   const closeMenu = useCallback(() => setMenuOpen(false), []);
 

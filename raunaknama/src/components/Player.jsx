@@ -11,6 +11,44 @@ const CLIENT_STREAM_CACHE_TTL_MS = 100 * 60 * 1000;
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
 
+// Crossfade duration between tracks — the outgoing track fades out on a
+// secondary <audio> element while the incoming one fades in on the primary
+// element, so there's real overlap instead of a hard cut.
+const CROSSFADE_MS = 1500;
+
+// Smoothly ramps an <audio> element's volume from `from` to `to` over
+// `durationMs`, driven by requestAnimationFrame. `rafRef` is a ref used to
+// track/cancel the in-flight ramp so a new one (e.g. a rapid track skip)
+// doesn't fight with a previous one still running.
+const rampAudioVolume = (el, from, to, durationMs, rafRef, onDone) => {
+  if (!el) return;
+  if (rafRef.current) cancelAnimationFrame(rafRef.current);
+  const start = performance.now();
+  const clamp = (v) => Math.min(1, Math.max(0, v));
+  try {
+    el.volume = clamp(from);
+  } catch (err) {
+    // Element may already be detached/gone — nothing to animate.
+    return;
+  }
+  const step = (now) => {
+    const t = Math.min(1, (now - start) / durationMs);
+    try {
+      el.volume = clamp(from + (to - from) * t);
+    } catch (err) {
+      rafRef.current = null;
+      return;
+    }
+    if (t < 1) {
+      rafRef.current = requestAnimationFrame(step);
+    } else {
+      rafRef.current = null;
+      if (onDone) onDone();
+    }
+  };
+  rafRef.current = requestAnimationFrame(step);
+};
+
 const formatTime = (secs) => {
   if (!secs || Number.isNaN(secs) || !Number.isFinite(secs)) return "0:00";
   const m = Math.floor(secs / 60);
@@ -18,6 +56,20 @@ const formatTime = (secs) => {
     .toString()
     .padStart(2, "0");
   return `${m}:${s}`;
+};
+
+// Fires a tiny haptic tick on play/pause/skip taps, mobile only (silently
+// does nothing wherever navigator.vibrate isn't supported, e.g. desktop
+// browsers and iOS Safari). Wrapped in try/catch since some browsers throw
+// rather than no-op when called from a context they don't like.
+const triggerHaptic = (ms = 12) => {
+  try {
+    if (typeof navigator !== "undefined" && typeof navigator.vibrate === "function") {
+      navigator.vibrate(ms);
+    }
+  } catch (err) {
+    // Unsupported/blocked — not worth surfacing to the listener.
+  }
 };
 
 const shuffledIndices = (length) => {
@@ -343,6 +395,15 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
   const [addToPlaylistFeedback, setAddToPlaylistFeedback] = useState("");
 
   const audioRef = useRef(null);
+  // ---------- Crossfade ----------
+  // A second, hidden <audio> element used only to play out the *outgoing*
+  // track's tail while the primary element loads and fades in the next
+  // one — see the "Managed Safe Audio Loading" effect below.
+  const crossfadeAudioRef = useRef(null);
+  const hasLoadedTrackRef = useRef(false); // false only before the very first track ever attaches
+  const pendingFadeInRef = useRef(false); // set when the next 'playing' event should ramp volume up instead of jumping to it
+  const fadeInRafRef = useRef(null);
+  const fadeOutRafRef = useRef(null);
   const importFileInputRef = useRef(null); // hidden <input type="file"> for restoring a local-playlists backup
   const consecutiveFailures = useRef(0);
   const hlsRef = useRef(null);
@@ -659,6 +720,35 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
     const token = ++loadTokenRef.current;
     let cancelled = false;
 
+    // ---------- Crossfade out the previous track ----------
+    // Only once we've already had a real track playing (never on the very
+    // first load) — hand the outgoing audio's current position off to the
+    // hidden secondary element, let it keep playing while it fades to
+    // silence over CROSSFADE_MS, then mute the primary element so the
+    // incoming track starts silent and ready to fade in once it's playing.
+    if (hasLoadedTrackRef.current && audio.src) {
+      const outgoing = crossfadeAudioRef.current;
+      if (outgoing) {
+        try {
+          const startVolume = audio.volume;
+          outgoing.src = audio.src;
+          outgoing.currentTime = audio.currentTime;
+          outgoing.volume = startVolume;
+          const playPromise = outgoing.play();
+          if (playPromise !== undefined) playPromise.catch(() => {});
+          rampAudioVolume(outgoing, startVolume, 0, CROSSFADE_MS, fadeOutRafRef, () => {
+            outgoing.pause();
+            outgoing.removeAttribute("src");
+          });
+        } catch (err) {
+          // Best-effort — worst case this track just cuts instead of fading.
+        }
+      }
+      audio.volume = 0;
+      pendingFadeInRef.current = true;
+    }
+    hasLoadedTrackRef.current = true;
+
     setCurrentTime(0);
     setDuration(0);
     setPlaybackError(null);
@@ -715,6 +805,20 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
       if (hlsRef.current) {
         hlsRef.current.destroy();
         hlsRef.current = null;
+      }
+    };
+  }, []);
+
+  // Cancel any in-flight crossfade volume ramps on unmount, and stop the
+  // hidden crossfade element so it doesn't keep playing into the void.
+  useEffect(() => {
+    return () => {
+      if (fadeInRafRef.current) cancelAnimationFrame(fadeInRafRef.current);
+      if (fadeOutRafRef.current) cancelAnimationFrame(fadeOutRafRef.current);
+      const outgoing = crossfadeAudioRef.current;
+      if (outgoing) {
+        outgoing.pause();
+        outgoing.removeAttribute("src");
       }
     };
   }, []);
@@ -898,6 +1002,7 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
   // 4. Playback Controls
   const handleNext = () => {
     if (!playlist) return;
+    triggerHaptic();
     setActiveSource("playlist");
     if (shuffle && shuffleOrder.length) {
       const pos = shuffleOrder.indexOf(currentIndex);
@@ -910,6 +1015,7 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
 
   const handlePrev = () => {
     if (!playlist) return;
+    triggerHaptic();
     setActiveSource("playlist");
     if (shuffle && shuffleOrder.length) {
       const pos = shuffleOrder.indexOf(currentIndex);
@@ -923,6 +1029,7 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
   const togglePlayPause = () => {
     const audio = audioRef.current;
     if (!audio) return;
+    triggerHaptic();
 
     if (isPlaying) {
       audio.pause();
@@ -1030,6 +1137,18 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
     consecutiveFailures.current = 0;
     setPlaybackError(null);
     setIsPlaying(true);
+
+    // If this "playing" is the start of a freshly-switched track (see the
+    // crossfade-out kickoff in the loading effect), ramp its volume up from
+    // silent instead of jumping straight to full — that's the "fade in"
+    // half of the crossfade.
+    if (pendingFadeInRef.current) {
+      pendingFadeInRef.current = false;
+      const audio = audioRef.current;
+      if (audio) {
+        rampAudioVolume(audio, 0, volume, CROSSFADE_MS, fadeInRafRef);
+      }
+    }
   };
 
   const toggleShuffle = () => {
@@ -1793,6 +1912,11 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
               className="native-audio"
             />
 
+            {/* Hidden — used only to play out the tail of the outgoing
+                track while it crossfades to silence (see the "Managed Safe
+                Audio Loading" effect). Never exposed to any controls. */}
+            <audio ref={crossfadeAudioRef} className="native-audio" aria-hidden="true" />
+
             {playbackError && (
               <p className="state-sub playback-error-note" role="status">
                 {playbackError}
@@ -1801,16 +1925,25 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
 
             <div className="seek-row">
               <span className="time">{formatTime(currentTime)}</span>
-              <input
-                type="range"
-                className="seek-bar"
-                min="0"
-                max={duration || 0}
-                step="0.1"
-                value={Math.min(currentTime, duration || 0)}
-                onChange={handleSeek}
-                aria-label="Seek"
-              />
+              <div className="seek-track-wrap">
+                <span
+                  className={`seek-progress-glow ${isPlaying ? "is-playing" : ""}`}
+                  style={{
+                    width: `${duration ? Math.min(100, (currentTime / duration) * 100) : 0}%`,
+                  }}
+                  aria-hidden="true"
+                />
+                <input
+                  type="range"
+                  className="seek-bar"
+                  min="0"
+                  max={duration || 0}
+                  step="0.1"
+                  value={Math.min(currentTime, duration || 0)}
+                  onChange={handleSeek}
+                  aria-label="Seek"
+                />
+              </div>
               <span className="time">{formatTime(duration)}</span>
             </div>
 

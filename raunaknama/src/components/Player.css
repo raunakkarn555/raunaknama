@@ -45,7 +45,7 @@
   backdrop-filter: blur(2px);
   opacity: 0;
   pointer-events: none;
-  transition: opacity 0.25s ease;
+  transition: opacity 0.25s cubic-bezier(0.32, 0.72, 0, 1);
 }
 
 .drawer-overlay.is-open {
@@ -476,8 +476,8 @@
   pointer-events: none;
   background: conic-gradient(
     from 0deg,
-    var(--stripe-gold) 0deg,
-    var(--stripe-red) 120deg,
+    var(--track-accent-soft) 0deg,
+    var(--track-accent) 120deg,
     transparent 200deg,
     transparent 360deg
   );
@@ -486,6 +486,7 @@
   opacity: 0.32;
   animation: orb-spin 7s linear infinite;
   animation-play-state: paused;
+  transition: background 0.7s ease;
 }
 
 .orb-ring.is-active {
@@ -510,9 +511,9 @@
   border-radius: 50%;
   transform: translateX(-50%);
   background: var(--cream);
-  box-shadow: 0 0 14px 3px rgba(226, 171, 63, 0.85);
+  box-shadow: 0 0 14px 3px var(--track-accent-soft);
   opacity: 0;
-  transition: opacity 0.2s ease;
+  transition: opacity 0.2s ease, box-shadow 0.7s ease;
 }
 
 .orb-ring--runner.is-active::before {
@@ -537,11 +538,11 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  background: linear-gradient(160deg, var(--stripe-gold), var(--stripe-red));
+  background: linear-gradient(160deg, var(--track-accent-soft), var(--track-accent));
   border: none;
   color: var(--bg);
-  box-shadow: 0 16px 36px -10px rgba(184, 51, 58, 0.65);
-  transition: transform 0.14s ease, filter 0.15s ease;
+  box-shadow: 0 16px 36px -10px var(--track-accent-glow);
+  transition: transform 0.14s ease, filter 0.15s ease, background 0.7s ease, box-shadow 0.7s ease;
 }
 
 .orb-play-btn svg {
@@ -677,9 +678,60 @@
   text-align: right;
 }
 
+.seek-track-wrap {
+  position: relative;
+  flex: 1;
+  display: flex;
+  align-items: center;
+}
+
 .seek-bar {
   flex: 1;
   height: 5px;
+  position: relative;
+  z-index: 1;
+}
+
+/* Subtle glowing fill riding under the native track, its width tracking
+   playback progress — a bit of "waveform" energy without replacing the
+   native range input's own hit-testing/drag behavior. */
+.seek-progress-glow {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  height: 5px;
+  min-width: 5px;
+  transform: translateY(-50%);
+  border-radius: 8px;
+  background: linear-gradient(90deg, var(--track-accent), var(--track-accent-soft));
+  box-shadow: 0 0 8px 1px var(--track-accent-glow);
+  opacity: 0.55;
+  pointer-events: none;
+  z-index: 0;
+  transition: width 0.12s linear, background 0.7s ease;
+}
+
+.seek-progress-glow.is-playing {
+  animation: seek-glow-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes seek-glow-pulse {
+  0%,
+  100% {
+    opacity: 0.4;
+    box-shadow: 0 0 6px 0 var(--track-accent-glow);
+  }
+  50% {
+    opacity: 0.9;
+    box-shadow: 0 0 15px 2px var(--track-accent-glow);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .seek-progress-glow.is-playing {
+    animation: none;
+    opacity: 0.7;
+  }
 }
 
 /* ---------- Range input base skin (seek + volume) ---------- */
@@ -860,7 +912,7 @@ input[type="range"]:focus-visible {
 .queue-list {
   max-height: 0;
   overflow-y: hidden;
-  transition: max-height 0.25s ease;
+  transition: max-height 0.3s cubic-bezier(0.32, 0.72, 0, 1);
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -1378,6 +1430,7 @@ input[type="range"]:focus-visible {
   padding: 20px;
   background: var(--scrim);
   backdrop-filter: blur(3px);
+  animation: modal-overlay-in 0.25s cubic-bezier(0.32, 0.72, 0, 1);
 }
 
 .playlist-modal {
@@ -1391,6 +1444,27 @@ input[type="range"]:focus-visible {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  animation: modal-panel-in 0.3s cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+@keyframes modal-overlay-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes modal-panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
 .playlist-modal-title {
