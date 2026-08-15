@@ -1056,10 +1056,17 @@ input[type="range"]:focus-visible {
 
 /* Small screens: leave clear room below the dock for the fixed footer
    group (tagline + credit line, pinned to the very bottom in App.css) so
-   the two never overlap. */
+   the two never overlap — sized generously enough to cover the tagline
+   wrapping onto a second line on narrow phones. */
 @media (max-width: 640px) {
   .player-dock {
-    bottom: calc(66px + env(safe-area-inset-bottom));
+    bottom: calc(92px + env(safe-area-inset-bottom));
+  }
+}
+
+@media (max-width: 380px) {
+  .player-dock {
+    bottom: calc(100px + env(safe-area-inset-bottom));
   }
 }
 

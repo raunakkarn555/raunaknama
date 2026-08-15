@@ -508,24 +508,34 @@
 
 .foot-tagline-text {
   display: inline-block;
+  max-width: 100%;
   opacity: 0;
-  transform: translateY(10px);
   filter: blur(4px);
-  transition: opacity 0.45s cubic-bezier(0.22, 1, 0.36, 1),
-    transform 0.45s cubic-bezier(0.22, 1, 0.36, 1),
-    filter 0.45s cubic-bezier(0.22, 1, 0.36, 1);
-  will-change: opacity, transform, filter;
+  transition: opacity 0.6s ease, filter 0.6s ease;
+  will-change: opacity, filter;
 }
 
 .foot-tagline-text--visible {
   opacity: 1;
-  transform: translateY(0);
   filter: blur(0);
 }
 
 @media (max-width: 640px) {
+  .foot-tagline {
+    max-width: 100%;
+    gap: 5px;
+  }
+
   .foot-tagline-text {
-    transform: translateY(8px);
+    font-size: 10.5px;
+    line-height: 1.35;
+  }
+}
+
+@media (max-width: 380px) {
+  .foot-tagline-text {
+    font-size: 9.5px;
+    line-height: 1.3;
   }
 }
 
