@@ -41,6 +41,27 @@ const PauseIcon = () => (
   </svg>
 );
 
+// Small ring spinner shown on the orb / next to the track while a stream
+// is being fetched (yt-dlp resolve), so it's obvious something's loading.
+const LoadingSpinnerIcon = ({ size = 20 }) => (
+  <svg
+    className="loading-spinner-icon"
+    viewBox="0 0 24 24"
+    width={size}
+    height={size}
+    fill="none"
+    aria-hidden="true"
+  >
+    <circle cx="12" cy="12" r="9" stroke="currentColor" strokeOpacity="0.25" strokeWidth="3" />
+    <path
+      d="M21 12a9 9 0 0 0-9-9"
+      stroke="currentColor"
+      strokeWidth="3"
+      strokeLinecap="round"
+    />
+  </svg>
+);
+
 const PrevIcon = () => (
   <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true">
     <path d="M6 5h2v14H6V5zm2.5 7L20 5v14L8.5 12z" />
@@ -211,6 +232,12 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
   const [showQueue, setShowQueue] = useState(false);
 
   const [playbackError, setPlaybackError] = useState(null);
+
+  // True only while we're actively waiting on a track's stream to resolve
+  // (the yt-dlp round-trip that can take a few seconds) — drives the
+  // "Loading…" indicator next to the track so listeners know it's on its
+  // way instead of wondering why nothing's happening yet.
+  const [isTrackLoading, setIsTrackLoading] = useState(false);
 
   // Custom playlists that any listener can create — saved only on THIS
   // device (localStorage), never on the server.
@@ -506,6 +533,7 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
     if (!currentTrack) {
       audio.removeAttribute("src");
       audio.pause();
+      setIsTrackLoading(false);
       return;
     }
 
@@ -515,12 +543,14 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
     setCurrentTime(0);
     setDuration(0);
     setPlaybackError(null);
+    setIsTrackLoading(true);
 
     const wantsPlay = isPlaying;
 
     resolveStream(currentTrack.id)
       .then((data) => {
         if (cancelled || token !== loadTokenRef.current) return;
+        setIsTrackLoading(false);
         attachStreamAndPlay(data, token, wantsPlay);
       })
       .catch((err) => {
@@ -539,16 +569,19 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
           resolveStream(trackId, { forceRefresh: true })
             .then((data) => {
               if (cancelled || token !== loadTokenRef.current) return;
+              setIsTrackLoading(false);
               attachStreamAndPlay(data, token, wantsPlay);
             })
             .catch((err2) => {
               if (cancelled || token !== loadTokenRef.current) return;
               console.warn("Stream re-resolve also failed:", err2.message);
+              setIsTrackLoading(false);
               handleStreamFailure(err2.details || err2.message);
             });
           return;
         }
 
+        setIsTrackLoading(false);
         handleStreamFailure(err.details || err.message);
       });
 
@@ -1356,11 +1389,18 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
                 <span className={`orb-ring orb-ring--runner ${isPlaying ? "is-active" : ""}`} />
                 <button
                   type="button"
-                  className="orb-play-btn"
+                  className={`orb-play-btn ${isTrackLoading ? "is-loading" : ""}`}
                   onClick={togglePlayPause}
-                  aria-label={isPlaying ? "Pause" : "Play"}
+                  disabled={isTrackLoading}
+                  aria-label={isTrackLoading ? "Loading" : isPlaying ? "Pause" : "Play"}
                 >
-                  {isPlaying ? <PauseIcon /> : <PlayIcon />}
+                  {isTrackLoading ? (
+                    <LoadingSpinnerIcon />
+                  ) : isPlaying ? (
+                    <PauseIcon />
+                  ) : (
+                    <PlayIcon />
+                  )}
                 </button>
               </div>
 
@@ -1386,6 +1426,12 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
                 {activeSource === "search"
                   ? currentTrack.channel || "From search"
                   : `Track ${currentIndex + 1} of ${playlist.tracks.length}`}
+                {isTrackLoading && (
+                  <span className="track-loading-tag">
+                    <LoadingSpinnerIcon size={11} />
+                    Loading&hellip;
+                  </span>
+                )}
               </p>
             </div>
 
