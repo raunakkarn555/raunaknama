@@ -405,7 +405,12 @@ function App() {
       </header>
 
       <main className="stage">
-        <Player onTrackChange={advanceBackground} menuOpen={menuOpen} onCloseMenu={closeMenu} />
+        <Player
+          onTrackChange={advanceBackground}
+          menuOpen={menuOpen}
+          onCloseMenu={closeMenu}
+          backgroundImageUrl={isMobile ? `/bg/mobile/${bgIndex}.jpg` : `/bg/${bgIndex}.jpg`}
+        />
       </main>
 
       <div className="site-footer">

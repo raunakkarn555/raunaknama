@@ -1,6 +1,13 @@
 import React, { useEffect, useState, useRef, useCallback } from "react";
 import Hls from "hls.js";
 import "./Player.css";
+import {
+  nativeMediaSessionInit,
+  nativeSetMetadata,
+  nativeSetPlaybackState,
+  nativeSetPositionState,
+  nativeAddMediaButtonListeners,
+} from "../lib/nativeMediaSession";
 
 // How long we trust a resolved stream URL client-side before re-resolving.
 // Kept comfortably under the server's own 2h cache window (see
@@ -491,7 +498,7 @@ const savePlaybackState = (state) => {
   }
 };
 
-export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
+export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroundImageUrl }) {
   // Read once, synchronously, before any state is seeded below — several
   // pieces of initial state (active playlist, track index, search pick,
   // volume) fall back to whatever was saved here so playback can resume.
@@ -1097,29 +1104,60 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
   // earphone/Bluetooth media buttons — without this, backgrounding the tab
   // or locking the phone leaves the listener with no way to control
   // playback at all.
+  // Native (Android app shell) media session — starts the foreground
+  // service + notification the first time a track is loaded. No-ops on
+  // regular web.
   useEffect(() => {
-    if (!("mediaSession" in navigator) || !currentTrack) return;
-    try {
-      navigator.mediaSession.metadata = new window.MediaMetadata({
-        title: currentTrack.title || "Raunaknama",
-        artist:
-          activeSource === "search"
-            ? currentTrack.channel || "Raunaknama"
-            : playlist?.playlistTitle || "Raunaknama",
-        album: "Raunaknama",
-        artwork: [
-          { src: "/icon-192.png", sizes: "192x192", type: "image/png" },
-          { src: "/icon-512.png", sizes: "512x512", type: "image/png" },
-        ],
-      });
-    } catch (err) {
-      // Not supported in this browser — harmless to skip.
-    }
-  }, [currentTrack?.id, currentTrack?.title, currentTrack?.channel, activeSource, playlist?.playlistTitle]);
+    nativeMediaSessionInit();
+  }, []);
 
   useEffect(() => {
-    if (!("mediaSession" in navigator)) return;
-    navigator.mediaSession.playbackState = isPlaying ? "playing" : "paused";
+    if (!currentTrack) return;
+    const title = currentTrack.title || "Raunaknama";
+    const artist =
+      activeSource === "search"
+        ? currentTrack.channel || "Raunaknama"
+        : playlist?.playlistTitle || "Raunaknama";
+
+    if ("mediaSession" in navigator) {
+      try {
+        navigator.mediaSession.metadata = new window.MediaMetadata({
+          title,
+          artist,
+          album: "Raunaknama",
+          artwork: [
+            { src: "/icon-192.png", sizes: "192x192", type: "image/png" },
+            { src: "/icon-512.png", sizes: "512x512", type: "image/png" },
+          ],
+        });
+      } catch (err) {
+        // Not supported in this browser — harmless to skip.
+      }
+    }
+
+    nativeSetMetadata({
+      title,
+      artist,
+      album: "Raunaknama",
+      // Use the same rotating backdrop photo currently showing on-screen
+      // for this track, instead of the static app icon — falls back to
+      // the icon if, for some reason, no backdrop URL is available yet.
+      artworkUrl: `${window.location.origin}${backgroundImageUrl || "/icon-512.png"}`,
+    });
+  }, [
+    currentTrack?.id,
+    currentTrack?.title,
+    currentTrack?.channel,
+    activeSource,
+    playlist?.playlistTitle,
+    backgroundImageUrl,
+  ]);
+
+  useEffect(() => {
+    if ("mediaSession" in navigator) {
+      navigator.mediaSession.playbackState = isPlaying ? "playing" : "paused";
+    }
+    nativeSetPlaybackState(isPlaying);
   }, [isPlaying]);
 
   // Re-registered every render (cheap) so each handler always closes over
@@ -1164,10 +1202,24 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
       if (audio && details.seekTime != null) audio.currentTime = details.seekTime;
     });
 
+    // Same handlers, wired up to the native notification / lock-screen
+    // controls added by the Android project's MediaNotificationPlugin.
+    const removeNativeListeners = nativeAddMediaButtonListeners({
+      onPlay: () => audioRef.current?.play().catch(() => {}),
+      onPause: () => audioRef.current?.pause(),
+      onNext: () => handleNext(),
+      onPrevious: () => handlePrev(),
+      onSeek: (positionSecs) => {
+        const audio = audioRef.current;
+        if (audio && positionSecs != null) audio.currentTime = positionSecs;
+      },
+    });
+
     return () => {
       ["play", "pause", "previoustrack", "nexttrack", "seekbackward", "seekforward", "seekto"].forEach(
         (action) => setHandler(action, null)
       );
+      removeNativeListeners();
     };
   });
 
@@ -1855,19 +1907,24 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu }) {
 
     // Keep the lock-screen / notification scrubber in sync — throttled so
     // we're not calling this on every ~250ms timeupdate tick.
-    if ("mediaSession" in navigator && audio.duration && Number.isFinite(audio.duration)) {
+    if (audio.duration && Number.isFinite(audio.duration)) {
       const now = Date.now();
       if (now - lastPositionStateRef.current > 900) {
         lastPositionStateRef.current = now;
-        try {
-          navigator.mediaSession.setPositionState({
-            duration: audio.duration,
-            playbackRate: audio.playbackRate || 1,
-            position: Math.min(audio.currentTime, audio.duration),
-          });
-        } catch (err) {
-          // Not supported in this browser — harmless to skip.
+        const position = Math.min(audio.currentTime, audio.duration);
+        const playbackRate = audio.playbackRate || 1;
+        if ("mediaSession" in navigator) {
+          try {
+            navigator.mediaSession.setPositionState({
+              duration: audio.duration,
+              playbackRate,
+              position,
+            });
+          } catch (err) {
+            // Not supported in this browser — harmless to skip.
+          }
         }
+        nativeSetPositionState(audio.duration, position, playbackRate);
       }
     }
   };
