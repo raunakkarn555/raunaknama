@@ -1121,14 +1121,22 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
 
     if ("mediaSession" in navigator) {
       try {
+        // Same backdrop photo used for the native app's notification —
+        // put it first so browsers that support MediaImage prefer it over
+        // the static app icon fallback.
+        const artwork = [];
+        if (backgroundImageUrl) {
+          artwork.push({ src: backgroundImageUrl, sizes: "512x512", type: "image/jpeg" });
+        }
+        artwork.push(
+          { src: "/icon-192.png", sizes: "192x192", type: "image/png" },
+          { src: "/icon-512.png", sizes: "512x512", type: "image/png" }
+        );
         navigator.mediaSession.metadata = new window.MediaMetadata({
           title,
           artist,
           album: "Raunaknama",
-          artwork: [
-            { src: "/icon-192.png", sizes: "192x192", type: "image/png" },
-            { src: "/icon-512.png", sizes: "512x512", type: "image/png" },
-          ],
+          artwork,
         });
       } catch (err) {
         // Not supported in this browser — harmless to skip.
