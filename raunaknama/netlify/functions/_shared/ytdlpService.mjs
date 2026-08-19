@@ -227,9 +227,15 @@ function downloadFile(url, destPath, redirectsLeft = 5) {
 // concurrent spawn of it. rename(2) on the same filesystem (both under
 // os.tmpdir()) is atomic, so a concurrent reader either sees the old file
 // or the fully-written new one — never a partial write.
+// Nightly channel, not the monthly-ish stable channel — see the matching
+// note in scripts/download-ytdlp.mjs for why: YouTube breaks extraction
+// often enough that stable lags behind, and yt-dlp's maintainers' own fix
+// for errors like "The page needs to be reloaded" is "update to nightly".
+const YTDLP_RELEASES_BASE = "https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/latest/download";
+
 async function downloadToTmp() {
   const filename = binaryFilename();
-  const url = `https://github.com/yt-dlp/yt-dlp/releases/latest/download/${filename}`;
+  const url = `${YTDLP_RELEASES_BASE}/${filename}`;
   const stagingPath = `${TMP_YTDLP_PATH}.download-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   try {
     await downloadFile(url, stagingPath);

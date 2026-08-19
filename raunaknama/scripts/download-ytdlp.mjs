@@ -72,6 +72,21 @@ function download(url, dest, redirectsLeft = 5) {
   });
 }
 
+// BUG FIX: this used to point at `yt-dlp/yt-dlp` (the monthly-ish stable
+// channel) and, worse, skip the download entirely whenever a binary already
+// existed on disk ("already present"). Once a binary was downloaded once —
+// including one checked into a zip/repo, or cached by a CI provider between
+// builds — it would NEVER be refreshed by any later `npm install`, no
+// matter how stale it got. YouTube changes something client-side (player
+// JS, signature/PO-token logic) often enough that a months-old yt-dlp build
+// reliably starts failing extraction with real, specific errors like
+// "The page needs to be reloaded." yt-dlp's own maintainers' standard
+// answer to that exact error is "update to nightly or master" — the
+// monthly stable channel lags behind YouTube's changes. So: pull from the
+// nightly channel (multiple releases a week, same official yt-dlp org),
+// and always re-fetch instead of trusting a stale file on disk.
+const YTDLP_RELEASES_BASE = "https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/latest/download";
+
 async function main() {
   const targets = new Set([PLATFORM_MAP.linux.x64]); // always need this for deployment
   const localFilename = filenameFor(process.platform, process.arch);
@@ -81,22 +96,25 @@ async function main() {
 
   for (const filename of targets) {
     const dest = path.join(BIN_DIR, filename);
-    if (fs.existsSync(dest)) {
-      console.log(`[yt-dlp setup] already present: ${filename}`);
-      continue;
-    }
-    const url = `https://github.com/yt-dlp/yt-dlp/releases/latest/download/${filename}`;
-    console.log(`[yt-dlp setup] downloading ${filename}...`);
+    const url = `${YTDLP_RELEASES_BASE}/${filename}`;
+    console.log(`[yt-dlp setup] downloading latest nightly ${filename}...`);
     try {
       await download(url, dest);
       if (!filename.endsWith(".exe")) fs.chmodSync(dest, 0o755);
       console.log(`[yt-dlp setup] saved ${dest}`);
     } catch (err) {
-      console.warn(`[yt-dlp setup] could not download ${filename}: ${err.message}`);
-      console.warn(
-        "[yt-dlp setup] the app will try to download it again at runtime " +
-          "(slower first request), or you can re-run: npm run setup:ytdlp"
-      );
+      if (fs.existsSync(dest)) {
+        console.warn(
+          `[yt-dlp setup] could not refresh ${filename} (${err.message}) — ` +
+            "keeping the existing (possibly stale) binary on disk."
+        );
+      } else {
+        console.warn(`[yt-dlp setup] could not download ${filename}: ${err.message}`);
+        console.warn(
+          "[yt-dlp setup] the app will try to download it again at runtime " +
+            "(slower first request), or you can re-run: npm run setup:ytdlp"
+        );
+      }
     }
   }
 }
