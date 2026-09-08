@@ -73,12 +73,23 @@ export const handler = async (event) => {
     "-f", FORMAT_SELECTOR,
     "-j", // dump-json: gives us both the resolved URL and its protocol/ext
     "--no-warnings",
-    // On a forced retry, ask yt-dlp for a different player client than its
-    // default choice. The default (usually "web") is the one most affected
-    // by YouTube's SABR/PO-token gating, which can produce a URL that
-    // resolves fine server-side but a browser can't actually fetch. "ios"
-    // and "android" clients are far less likely to hand back a gated URL.
-    ...(isRetry ? ["--extractor-args", "youtube:player_client=ios,android"] : []),
+    // Always ask yt-dlp for "ios,android" instead of letting it fall back to
+    // its own default ("web") first. This used to only happen on a forced
+    // retry, but the "web" client is both the one most affected by
+    // YouTube's SABR/PO-token gating (can hand back a URL that resolves
+    // server-side but a browser can't actually fetch) AND the slowest to
+    // resolve from a shared/throttled cloud IP — meaning tracks that need
+    // it were exactly the ones likely to blow past Netlify's function
+    // timeout before ever reaching the retry path. Starting with the
+    // faster, less-gated clients up front fixes both problems for the
+    // first attempt instead of only recovering them after an initial
+    // failure. On forced retry we now go a step further with "tv_embedded"
+    // as a third fallback client, in case ios/android themselves got
+    // temporarily rate-limited for this IP.
+    "--extractor-args",
+    isRetry
+      ? "youtube:player_client=ios,android,tv_embedded"
+      : "youtube:player_client=ios,android",
     ...authArgs(),
     videoUrl,
   ];

@@ -292,6 +292,33 @@
   text-align: left;
 }
 
+/* Songs that already exist in one of the listener's radio playlists —
+   surfaced at the top of results, tagged with which playlist. */
+.search-result-item--in-playlist {
+  background: rgba(226, 171, 63, 0.06);
+  border-left: 2px solid var(--track-accent, #e2ab3f);
+}
+
+.search-result-item--in-playlist:hover {
+  background: rgba(226, 171, 63, 0.14);
+}
+
+.search-result-playlist-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  align-self: flex-start;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--track-accent, #e2ab3f);
+  background: rgba(226, 171, 63, 0.14);
+  border-radius: 999px;
+  padding: 2px 8px 2px 6px;
+  margin-bottom: 2px;
+}
+
 /* ---------- Now-playing header ---------- */
 
 .now-playing-head {

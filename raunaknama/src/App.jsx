@@ -382,7 +382,7 @@ function App() {
           </button>
           <div className="topbar-mark">
             <span className="pole-chip" aria-hidden="true" />
-            <span className="brand">Raunaknama</span>
+            <span className="brand">RaunakNama</span>
           </div>
         </div>
 

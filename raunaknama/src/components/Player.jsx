@@ -23,6 +23,12 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
 // element, so there's real overlap instead of a hard cut.
 const CROSSFADE_MS = 1500;
 
+// How many seconds before a track's natural end we proactively advance to
+// the next track (see the "gapless background advance" note above
+// handleTrackEnded for why this exists — kept equal to CROSSFADE_MS so the
+// crossfade-out always has real remaining audio to bridge with).
+const EARLY_ADVANCE_SECS = CROSSFADE_MS / 1000;
+
 // Smoothly ramps an <audio> element's volume from `from` to `to` over
 // `durationMs`, driven by requestAnimationFrame. `rafRef` is a ref used to
 // track/cancel the in-flight ramp so a new one (e.g. a rapid track skip)
@@ -233,6 +239,16 @@ const EqualizerIcon = ({ active }) => (
     <span className="eq-bar" />
     <span className="eq-bar" />
   </span>
+);
+
+// Small badge icon for search results that are already sitting in one of
+// the listener's own radio playlists — just a stacked-lines glyph, kept
+// intentionally simple/tiny since it's rendered inline with text.
+const PlaylistBadgeIcon = () => (
+  <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" aria-hidden="true">
+    <path d="M4 6h13M4 12h13M4 18h8" />
+    <circle cx="20" cy="16" r="2.4" fill="currentColor" stroke="none" />
+  </svg>
 );
 
 const CloseIcon = () => (
@@ -531,6 +547,19 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
   const [searchResults, setSearchResults] = useState([]);
   const [isSearching, setIsSearching] = useState(false);
   const [searchFocused, setSearchFocused] = useState(false);
+
+  // --- Cross-playlist search matching -------------------------------
+  // trackId -> { playlistId, playlistLabel } for every track across all 7
+  // radio playlists (see the background-loading effect below), plus a
+  // flat list of the same data for the title-text fallback match. Refs,
+  // not state — this is only ever read at ranking time, never rendered
+  // directly, so there's no need to re-render when it updates (the
+  // `playlistIndexVersion` bump below handles re-ranking whatever search
+  // results are already on screen).
+  const playlistTrackIndexRef = useRef(new Map());
+  const playlistTrackListRef = useRef([]);
+  const rawSearchResultsRef = useRef([]);
+  const [playlistIndexVersion, setPlaylistIndexVersion] = useState(0);
   const [searchTrack, setSearchTrack] = useState(
     () => initialPlaybackStateRef.current?.activeSource === "search"
       ? initialPlaybackStateRef.current?.searchTrack || null
@@ -651,6 +680,7 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
   const retriedTrackIdsRef = useRef(new Set()); // track ids that already got one forced (cache-bypassing) re-resolve after a playback failure
   const prefetchedAutoplayRef = useRef(null); // { seedId, track } — the next "similar songs" autoplay pick, looked up + stream-resolved ahead of time
   const pendingBackgroundResumeRef = useRef(false); // true while we're waiting for the tab to come back to the foreground before retrying a failed resolve (see handleStreamFailure)
+  const earlyAdvanceFiredRef = useRef(false); // guards the gapless early-advance (see handleTimeUpdate) from firing twice, and from double-firing alongside the real 'ended' event
 
   // 0. Fetch available playlists once. This runs in parallel with the
   // playlist-metadata fetch below (which now defaults to "default" instead
@@ -672,6 +702,49 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
       })
       .catch((err) => console.error("Playlists list fetch error:", err));
   }, []);
+
+  // 0a. Background-load every radio playlist's track list once we know
+  // what they are, purely so search can tell "this song is already in
+  // one of your playlists" — never blocks the UI, never touches
+  // isSearching/searchResults directly. Each /api/playlist call already
+  // has its own server-side cache (ytdlpService.mjs), so this doesn't add
+  // real extra yt-dlp load beyond what browsing those playlists would
+  // anyway; it just does it eagerly instead of waiting for the listener
+  // to open each tab manually. If a fetch fails for one playlist, the
+  // others still populate — a song from that one playlist just won't get
+  // the "in playlist" badge until the next successful load.
+  useEffect(() => {
+    if (!playlists.length) return;
+    let cancelled = false;
+
+    Promise.all(
+      playlists.map((p) =>
+        fetch(`${API_BASE}/api/playlist?playlistId=${p.id}`)
+          .then((res) => (res.ok ? res.json() : null))
+          .then((data) => ({ playlistId: p.id, playlistLabel: p.label, tracks: data?.tracks || [] }))
+          .catch(() => ({ playlistId: p.id, playlistLabel: p.label, tracks: [] }))
+      )
+    ).then((perPlaylist) => {
+      if (cancelled) return;
+      const idIndex = new Map();
+      const flat = [];
+      perPlaylist.forEach(({ playlistId, playlistLabel, tracks }) => {
+        tracks.forEach((t) => {
+          // First playlist a song appears in wins the badge if it's in
+          // more than one — good enough, and keeps this simple.
+          if (!idIndex.has(t.id)) idIndex.set(t.id, { playlistId, playlistLabel });
+          flat.push({ id: t.id, title: t.title, playlistId, playlistLabel });
+        });
+      });
+      playlistTrackIndexRef.current = idIndex;
+      playlistTrackListRef.current = flat;
+      setPlaylistIndexVersion((v) => v + 1);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [playlists]);
 
   // 0b. Safety net: never let the "Warming up the mic…" state hang forever.
   // If nothing has resolved after 20s (slow cold start, blocked network,
@@ -771,9 +844,57 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
       });
   }, [activePlaylistId, customPlaylists, pushToast]);
 
+  // Merges live YouTube search results with the cross-playlist index built
+  // above, so a song already sitting in one of the 7 radio playlists shows
+  // up first — tagged with which playlist it's from — instead of wherever
+  // YouTube's search ranking happened to place it (or not at all, if it
+  // didn't make YouTube's top 12 for this query).
+  //
+  // agar playlist me hai to sabse upar phle wo aaye, uske baad baki jaise
+  // pehle aate the waise hi aayen; agar playlist me nahi hai to bilkul
+  // pehle jaisa hi behavior.
+  const rankSearchResults = useCallback((rawResults, query) => {
+    const idIndex = playlistTrackIndexRef.current;
+    const normalize = (s) => (s || "").toLowerCase().trim();
+
+    // Definite matches: this exact video ID is a track in one of the 7
+    // playlists. Tag it, but otherwise leave its position relative to the
+    // other results untouched for now — the split below moves it up.
+    const tagged = rawResults.map((r) => {
+      const hit = idIndex.get(r.id);
+      return hit ? { ...r, playlistId: hit.playlistId, playlistLabel: hit.playlistLabel } : r;
+    });
+
+    // Fallback: the song lives in a playlist but YouTube's own search
+    // didn't surface that exact video in its top 12 for this query — find
+    // it by title text instead so it still shows up. Capped at 5 so a
+    // very generic query (e.g. a single common word) can't flood the top
+    // of the list.
+    const q = normalize(query);
+    const seenIds = new Set(tagged.map((r) => r.id));
+    const extraFromPlaylists = q
+      ? playlistTrackListRef.current
+          .filter((t) => !seenIds.has(t.id) && normalize(t.title).includes(q))
+          .slice(0, 5)
+          .map((t) => ({
+            id: t.id,
+            title: t.title,
+            channel: "",
+            duration: null,
+            playlistId: t.playlistId,
+            playlistLabel: t.playlistLabel,
+          }))
+      : [];
+
+    const inPlaylist = tagged.filter((r) => r.playlistLabel);
+    const rest = tagged.filter((r) => !r.playlistLabel);
+    return [...extraFromPlaylists, ...inPlaylist, ...rest];
+  }, []);
+
   // 2. Search Debounce
   useEffect(() => {
     if (!searchQuery.trim()) {
+      rawSearchResultsRef.current = [];
       setSearchResults([]);
       setIsSearching(false);
       return;
@@ -798,9 +919,13 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
             return data.results || [];
           })
         )
-        .then((results) => setSearchResults(results))
+        .then((results) => {
+          rawSearchResultsRef.current = results;
+          setSearchResults(rankSearchResults(results, searchQuery));
+        })
         .catch((err) => {
           console.error("Search error:", err);
+          rawSearchResultsRef.current = [];
           setSearchResults([]);
           pushToast(
             isOnline ? "Search failed — please try again." : "You're offline — search unavailable.",
@@ -811,7 +936,16 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
     }, 450);
 
     return () => clearTimeout(handle);
-  }, [searchQuery, pushToast, isOnline]);
+  }, [searchQuery, pushToast, isOnline, rankSearchResults]);
+
+  // 2b. If the cross-playlist index finishes loading (or refreshes) after
+  // results are already on screen, re-rank the results already fetched
+  // instead of waiting for the next keystroke — no extra network call.
+  useEffect(() => {
+    if (!rawSearchResultsRef.current.length) return;
+    setSearchResults(rankSearchResults(rawSearchResultsRef.current, searchQuery));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [playlistIndexVersion]);
 
   const currentTrack =
     activeSource === "search" ? searchTrack : playlist?.tracks?.[currentIndex];
@@ -958,6 +1092,7 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
 
     const token = ++loadTokenRef.current;
     let cancelled = false;
+    earlyAdvanceFiredRef.current = false;
 
     // ---------- Crossfade out the previous track ----------
     // Only once we've already had a real track playing (never on the very
@@ -1740,7 +1875,17 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
   // isPlaying to false via the existing onPause handler. For the playlist
   // branch we re-assert isPlaying(true) after advancing so the newly loaded
   // track actually starts playing instead of loading silently.
+  //
+  // In the normal case this never actually runs the advance logic below —
+  // handleTimeUpdate's gapless early-advance (see its comment) already
+  // switched to the next track a couple seconds before natural end, which
+  // means audio.src (and therefore the whole "current track") already
+  // changed, so this "ended" event belongs to an abandoned load and Chrome
+  // won't even fire it. This stays as a safety net for the rare case
+  // duration was unknown/Infinity (e.g. a live/HLS edge case) so early
+  // advance never got a chance to fire.
   const handleTrackEnded = () => {
+    if (earlyAdvanceFiredRef.current) return;
     if (!autoplay) {
       setIsPlaying(false);
       return;
@@ -1912,6 +2057,49 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
     const audio = audioRef.current;
     if (!audio) return;
     setCurrentTime(audio.currentTime);
+
+    // ---------- Gapless background advance ----------
+    // Why this exists: the normal "next track" trigger is the <audio>
+    // element's native "ended" event (see handleTrackEnded below). But by
+    // the time a track actually reaches "ended", audio.currentTime already
+    // equals audio.duration — there is zero audio left to play. That means
+    // the crossfade-out bridge (which plays the *outgoing* track's remaining
+    // audio on a hidden second element while the next track's stream loads)
+    // has nothing left to play either, so for that brief window NO <audio>
+    // element on the page is actually producing sound.
+    //
+    // On desktop that's invisible. On a locked phone it's fatal: mobile
+    // Chrome/WebView keeps a backgrounded tab's JS running specifically
+    // because it holds an active, audibly-playing Media Session — the
+    // instant that goes silent (even for under a second, while we fetch the
+    // next stream URL), the OS is free to suspend the tab entirely. If that
+    // happens before the fetch resolves, nothing ever calls audio.play()
+    // again, and playback stays dead until the listener reopens the app.
+    // That matches exactly what was reported: audio plays fine while
+    // locked, but never advances past the first track ended while locked.
+    //
+    // Fix: don't wait for "ended" at all. Advance EARLY_ADVANCE_SECS before
+    // the track actually finishes, while there's still real audio playing —
+    // so the existing crossfade-out has genuine content to bridge with, the
+    // Media Session never goes silent, and the OS has no excuse to suspend
+    // the tab mid-transition. This also makes track transitions gapless
+    // in the foreground as a nice side effect.
+    if (
+      autoplay &&
+      !earlyAdvanceFiredRef.current &&
+      Number.isFinite(audio.duration) &&
+      audio.duration > EARLY_ADVANCE_SECS * 2 &&
+      audio.currentTime > 0 &&
+      audio.duration - audio.currentTime <= EARLY_ADVANCE_SECS
+    ) {
+      earlyAdvanceFiredRef.current = true;
+      if (activeSource === "search") {
+        playNextAutoplayTrack();
+      } else if (playlist && playlist.tracks.length > 1) {
+        handleNext();
+        setIsPlaying(true);
+      }
+    }
 
     // Keep the lock-screen / notification scrubber in sync — throttled so
     // we're not calling this on every ~250ms timeupdate tick.
@@ -2446,10 +2634,15 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
               searchResults.map((track) => (
                 <div
                   key={track.id}
-                  className="search-result-item"
+                  className={`search-result-item ${track.playlistLabel ? "search-result-item--in-playlist" : ""}`}
                   onMouseDown={() => playSearchResult(track)}
                 >
                   <div className="search-result-text">
+                    {track.playlistLabel && (
+                      <span className="search-result-playlist-badge">
+                        <PlaylistBadgeIcon /> {track.playlistLabel}
+                      </span>
+                    )}
                     <span className="search-result-title line-clamp-2">{track.title}</span>
                     {track.channel && <span className="search-result-channel">{track.channel}</span>}
                   </div>

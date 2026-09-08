@@ -32,6 +32,21 @@ export const PLAYLISTS = [
     label: "Oldnama",
     url: "https://youtube.com/playlist?list=PLUaT2mpNqhF8",
   },
+  {
+    id: "playlist-5",
+    label: "GhazalNama",
+    url: "https://youtube.com/playlist?list=PLH-kuQcGqUkw",
+  },
+  {
+    id: "playlist-6",
+    label: "RafiNama",
+    url: "https://youtube.com/playlist?list=PLDIP2VvLNbz0",
+  },
+  {
+    id: "playlist-7",
+    label: "KishoreNama",
+    url: "https://youtube.com/playlist?list=PLfPVo2iio_44",
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -88,18 +103,23 @@ export function authArgs() {
     "--js-runtimes",
     "node",
     // Bug fix: without an explicit socket timeout, a stalled/slow TCP
-    // connection to YouTube just sits there until our own 9s JS watchdog
-    // (below) SIGKILLs the whole process — which throws away any partial
-    // progress and always reports the same generic "Failed to extract
-    // playable audio stream" error, with no real reason. Capping yt-dlp's
-    // own per-request socket timeout well under that watchdog means a slow
-    // connection fails *inside* yt-dlp first, with a real, specific stderr
-    // reason (timeout/connection error) that now actually reaches the
-    // frontend via `details` — and a couple of quick automatic retries
-    // often recover it without ever hitting the watchdog at all.
-    "--socket-timeout", "6",
-    "--extractor-retries", "1",
-    "--retries", "1",
+    // connection to YouTube just sits there until our own JS watchdog
+    // (YTDLP_TIMEOUT_MS, below) SIGKILLs the whole process — which throws
+    // away any partial progress and always reports the same generic
+    // "Failed to extract playable audio stream" error, with no real
+    // reason. Capping yt-dlp's own per-request socket timeout well under
+    // that watchdog means a slow connection fails *inside* yt-dlp first,
+    // with a real, specific stderr reason (timeout/connection error) that
+    // now actually reaches the frontend via `details` — and a couple of
+    // automatic retries often recover it without ever hitting the
+    // watchdog at all.
+    //
+    // Values raised from the original 6s/1/1 now that YTDLP_TIMEOUT_MS
+    // has real room (45s, not the old 9s) — a slow-but-working connection
+    // now gets multiple real attempts instead of failing after one.
+    "--socket-timeout", "10",
+    "--extractor-retries", "2",
+    "--retries", "3",
   ];
   if (COOKIES_PATH) {
     args.push("--cookies", COOKIES_PATH);
@@ -288,12 +308,27 @@ async function ensureYtDlp() {
   return ytdlpReadyPromise;
 }
 
-// Hard ceiling on any single yt-dlp invocation. Netlify's default function
-// timeout is short; if yt-dlp hangs (blocked network, bad cookies, etc.) we
-// want to kill it and return a real JSON error well before that, rather
-// than letting Netlify itself kill the function and return an HTML error
-// page.
-const YTDLP_TIMEOUT_MS = 9000;
+// Hard ceiling on any single yt-dlp invocation.
+//
+// CORRECTED (previous comment here was wrong): Netlify's synchronous
+// function execution limit is NOT a fixed 60s. It's 10s by default, and the
+// max reachable at all — even on a paid Pro plan, via the `timeout` field
+// in netlify.toml's [functions."name"] block — is 26s. On the free/Starter
+// plan the limit stays 10s no matter what netlify.toml says. A 45s watchdog
+// here can never fire in production: Netlify kills the whole function
+// first, which returns an HTML/opaque error the frontend can't parse as
+// JSON — exactly the vague "backend down" symptom being reported, and it
+// hits hardest on videos that need more extraction work server-side (e.g.
+// "Topic" channel / auto-generated official-audio uploads), since those are
+// the ones most likely to run long enough to cross Netlify's real cutoff.
+//
+// 22000ms leaves a margin under the 26s cap configured for the stream/
+// search/playlist functions in netlify.toml (see that file's comment). If
+// you're on Netlify's free/Starter plan, that 26s config has no effect and
+// the platform still kills at 10s — set YTDLP_TIMEOUT_MS=8000 via an env
+// var in that case so this watchdog fires first with a clean JSON error
+// instead of letting Netlify hard-kill mid-request.
+const YTDLP_TIMEOUT_MS = Number(process.env.YTDLP_TIMEOUT_MS) || 22000;
 
 function spawnYtDlpOnce(ytdlpPath, args) {
   return new Promise((resolve, reject) => {
