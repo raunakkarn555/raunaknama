@@ -65,8 +65,17 @@ function resolveCookiesPath() {
   }
 
   if (process.env.YTDLP_COOKIES_B64) {
+    // .trim() matters here: it's very easy for a stray leading/trailing
+    // newline or space to sneak into the value — e.g. Netlify's env var UI
+    // sometimes appends a trailing newline on paste, and terminals that
+    // wrap long lines can make it look like there's extra whitespace even
+    // when there isn't. Whitespace among the base64 alphabet is otherwise
+    // harmless (Buffer.from skips it), but leading/trailing whitespace can
+    // still shift what gets treated as padding, so strip it defensively.
+    const b64 = process.env.YTDLP_COOKIES_B64.trim();
+    console.log(`YTDLP_COOKIES_B64 present: ${b64.length} chars`);
     try {
-      const raw = Buffer.from(process.env.YTDLP_COOKIES_B64, "base64");
+      const raw = Buffer.from(b64, "base64");
       // Netlify env vars are capped at ~5000 chars, and a plain base64'd
       // cookies.txt blows past that. So we gzip-compress before base64'ing
       // (see scripts/encode-cookies.mjs) and gunzip here on read. Detect the
@@ -79,7 +88,28 @@ function resolveCookiesPath() {
       console.log(`Loaded YouTube cookies from YTDLP_COOKIES_B64 (${isGzip ? "gzip" : "plain"})`);
       return tmpPath;
     } catch (err) {
-      console.error("Failed to decode YTDLP_COOKIES_B64:", err.message);
+      // "incorrect data check" specifically means the bytes we base64-
+      // decoded don't gunzip cleanly — i.e. the *value itself* is corrupt or
+      // incomplete, not a code bug. In practice this almost always means the
+      // string that ended up in the env var isn't byte-for-byte what
+      // scripts/encode-cookies.mjs printed. Common causes, in order of
+      // likelihood:
+      //   1. Copying encode-cookies.mjs's terminal output by hand and
+      //      accidentally including its "Input:/Compressed:/Base64:" info
+      //      lines (printed to stderr, so they interleave with the actual
+      //      value in a terminal) — those lines contain base64-alphabet
+      //      characters too, so the corruption is silent until gunzip runs.
+      //      Fix: redirect stdout only — `node scripts/encode-cookies.mjs
+      //      cookies.txt > cookies.b64` — then copy from that file, not the
+      //      terminal.
+      //   2. Pasting into Netlify's dashboard env var field and it silently
+      //      truncating (there's a soft ~5000 char cap; encode-cookies.mjs
+      //      warns if its output is already over that). Prefer
+      //      `netlify env:set YTDLP_COOKIES_B64 "$(cat cookies.b64)"`
+      //      over the web UI for long values.
+      //   3. Setting it per a single deploy context that doesn't cover the
+      //      one actually serving requests (Production vs. branch deploys).
+      console.error(`Failed to decode YTDLP_COOKIES_B64 (${b64.length} chars): ${err.message}`);
     }
   }
 
