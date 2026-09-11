@@ -69,27 +69,39 @@ export const handler = async (event) => {
   const videoUrl = `https://www.youtube.com/watch?v=${id}`;
   console.log(`Extracting audio stream info for track ID: ${id}${isRetry ? " (forced retry)" : ""}`);
 
+  // BUG FIX (root cause of the widespread "Requested format is not
+  // available" failures reported Sept 2026): this used to hardcode
+  // `--extractor-args youtube:player_client=ios,android` (and
+  // `ios,android,tv_embedded` on retry). That made sense when it was
+  // written, but YouTube's PO-token enforcement has since expanded to
+  // cover the `ios` and `android` clients' format URLs too — as of mid/late
+  // 2026 both clients frequently return zero downloadable formats without a
+  // GVS PO token yt-dlp has no way to supply here, which is exactly what
+  // "Requested format is not available" means (the FORMAT_SELECTOR's whole
+  // chain, down to plain "best", had nothing to match against because the
+  // *format list itself* came back empty for those clients). This bit
+  // everyone, not just some tracks, which is why it reproduced on every
+  // video ID.
+  //
+  // The fix is to stop hardcoding a client list at all and let yt-dlp use
+  // its own built-in default (currently `tv,ios,web`, or `tv,web` when
+  // cookies are present) — exactly the reasoning already documented on
+  // authArgs() above, which this handler was inconsistently overriding.
+  // yt-dlp's maintainers update that default with every release specifically
+  // to track which clients still serve PO-token-free formats, and we always
+  // run the latest nightly build (see scripts/download-ytdlp.mjs), so
+  // deferring to it keeps this working without needing another manual fix
+  // the next time YouTube shifts the goalposts.
+  //
+  // On a forced retry we do still override, but with "mweb" — the client
+  // yt-dlp's own PO-token guide currently recommends as the fallback when
+  // the default clients are having trouble, and one that benefits most from
+  // the cookies we already attach via authArgs().
   const args = [
     "-f", FORMAT_SELECTOR,
     "-j", // dump-json: gives us both the resolved URL and its protocol/ext
     "--no-warnings",
-    // Always ask yt-dlp for "ios,android" instead of letting it fall back to
-    // its own default ("web") first. This used to only happen on a forced
-    // retry, but the "web" client is both the one most affected by
-    // YouTube's SABR/PO-token gating (can hand back a URL that resolves
-    // server-side but a browser can't actually fetch) AND the slowest to
-    // resolve from a shared/throttled cloud IP — meaning tracks that need
-    // it were exactly the ones likely to blow past Netlify's function
-    // timeout before ever reaching the retry path. Starting with the
-    // faster, less-gated clients up front fixes both problems for the
-    // first attempt instead of only recovering them after an initial
-    // failure. On forced retry we now go a step further with "tv_embedded"
-    // as a third fallback client, in case ios/android themselves got
-    // temporarily rate-limited for this IP.
-    "--extractor-args",
-    isRetry
-      ? "youtube:player_client=ios,android,tv_embedded"
-      : "youtube:player_client=ios,android",
+    ...(isRetry ? ["--extractor-args", "youtube:player_client=mweb,tv_embedded"] : []),
     ...authArgs(),
     videoUrl,
   ];

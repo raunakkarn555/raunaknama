@@ -222,7 +222,47 @@ function candidatePaths(filename) {
   ];
 }
 
-const TMP_YTDLP_PATH = path.join(os.tmpdir(), "yt-dlp_bin");
+// BUG FIX (Windows "spawn ... yt-dlp_bin ENOENT"): this path used to be a
+// bare `yt-dlp_bin` with no extension, on every platform. Two problems:
+//   1. On Windows, an extension-less unsigned binary sitting in %TEMP% is
+//      exactly the profile Windows Defender / most AV products flag and
+//      silently quarantine-delete — often *after* ensureYtDlp() already
+//      resolved and cached this path, so the next spawn() hits a file that
+//      vanished out from under it and throws a raw, unhandled
+//      `spawn ...\yt-dlp_bin ENOENT` straight up to the frontend (that's
+//      the exact error being reported).
+//   2. It also didn't match the platform's expected executable naming
+//      (.exe), which some Windows security tooling additionally treats as
+//      a reason for suspicion on its own.
+// Giving it the real platform-appropriate filename (yt-dlp.exe on Windows)
+// fixes #2 outright and makes #1 less likely. #1 is fully closed below by
+// re-verifying the file still exists on every call, not just once at
+// download time — see ensureYtDlp()/spawnYtDlp().
+function tmpBinaryPath() {
+  let filename;
+  try {
+    filename = binaryFilename();
+  } catch {
+    filename = "yt-dlp_bin";
+  }
+  return path.join(os.tmpdir(), `yt-dlp_bin${path.extname(filename)}`);
+}
+
+const TMP_YTDLP_PATH = tmpBinaryPath();
+
+// A real yt-dlp build is tens of MB. Anything drastically smaller means a
+// previous download got cut short / quarantined mid-write — treat it as
+// absent rather than trusting a corrupt file into spawn().
+const MIN_VALID_BINARY_BYTES = 1_000_000;
+
+function isUsableBinary(candidatePath) {
+  try {
+    const stat = fs.statSync(candidatePath);
+    return stat.isFile() && stat.size >= MIN_VALID_BINARY_BYTES;
+  } catch {
+    return false;
+  }
+}
 
 function findBundledBinary() {
   let filename;
@@ -232,7 +272,7 @@ function findBundledBinary() {
     return null;
   }
   for (const candidate of candidatePaths(filename)) {
-    if (fs.existsSync(candidate)) return candidate;
+    if (isUsableBinary(candidate)) return candidate;
   }
   return null;
 }
@@ -301,8 +341,32 @@ async function downloadToTmp() {
 }
 
 let ytdlpReadyPromise = null;
+// The path ytdlpReadyPromise last resolved to. Kept separately so we can
+// cheaply re-stat it on every call instead of re-running the whole
+// bundled-binary-search + possible-download flow each time.
+let resolvedYtdlpPath = null;
 
-async function ensureYtDlp() {
+// BUG FIX (Windows "spawn ... yt-dlp_bin ENOENT"): previously, once
+// ytdlpReadyPromise resolved successfully it was cached *forever* for the
+// life of the process, and nothing ever re-checked that the file it
+// pointed to was still there. On a long-lived local `netlify dev` process
+// (or a warm cloud container), if something outside our control removes
+// that file after the fact — most commonly Windows Defender / other AV
+// quietly quarantining an unsigned binary sitting in %TEMP% — every
+// subsequent request would keep trusting the stale cached path, spawn()
+// would fail to find it, and Node's raw `spawn <path> ENOENT` error would
+// go straight to the frontend uncaught. Re-verifying with a cheap stat
+// call on every invocation (not just the first) means a vanished binary
+// gets transparently re-downloaded instead of surfacing that error.
+async function ensureYtDlp({ forceRedownload = false } = {}) {
+  if (!forceRedownload && resolvedYtdlpPath && isUsableBinary(resolvedYtdlpPath)) {
+    return resolvedYtdlpPath;
+  }
+  if (forceRedownload) {
+    ytdlpReadyPromise = null;
+    resolvedYtdlpPath = null;
+  }
+
   if (!ytdlpReadyPromise) {
     ytdlpReadyPromise = (async () => {
       // 1. Bundled binary (shipped via netlify.toml's included_files) —
@@ -312,14 +376,15 @@ async function ensureYtDlp() {
 
       // 2. Already downloaded to /tmp by a previous invocation on this warm
       //    container.
-      if (fs.existsSync(TMP_YTDLP_PATH)) return TMP_YTDLP_PATH;
+      if (isUsableBinary(TMP_YTDLP_PATH)) return TMP_YTDLP_PATH;
 
       console.warn(
-        "yt-dlp binary not found at expected path — this usually means " +
-          "`npm install` hasn't finished running scripts/download-ytdlp.mjs, " +
-          "or netlify.toml's `included_files` didn't ship it. Attempting a " +
-          "runtime download to " + os.tmpdir() + " as a fallback (slower " +
-          "first request)."
+        "yt-dlp binary not found (or vanished) at the expected path — this " +
+          "usually means `npm install` hasn't finished running " +
+          "scripts/download-ytdlp.mjs, netlify.toml's `included_files` " +
+          "didn't ship it, or (on Windows) antivirus removed a previously " +
+          "downloaded copy from %TEMP%. Attempting a runtime download to " +
+          os.tmpdir() + " as a fallback (slower first request)."
       );
 
       try {
@@ -335,7 +400,8 @@ async function ensureYtDlp() {
     // Don't cache a rejected promise — let the next request retry.
     ytdlpReadyPromise.catch(() => { ytdlpReadyPromise = null; });
   }
-  return ytdlpReadyPromise;
+  resolvedYtdlpPath = await ytdlpReadyPromise;
+  return resolvedYtdlpPath;
 }
 
 // Hard ceiling on any single yt-dlp invocation.
@@ -399,7 +465,7 @@ function spawnYtDlpOnce(ytdlpPath, args) {
 }
 
 export async function spawnYtDlp(args) {
-  const ytdlpPath = await ensureYtDlp();
+  let ytdlpPath = await ensureYtDlp();
   try {
     return await spawnYtDlpOnce(ytdlpPath, args);
   } catch (err) {
@@ -413,6 +479,22 @@ export async function spawnYtDlp(args) {
     if (err && err.code === "ETXTBSY") {
       console.warn("[ytdlp] spawn ETXTBSY, retrying once after a short delay...");
       await new Promise((r) => setTimeout(r, 300));
+      return await spawnYtDlpOnce(ytdlpPath, args);
+    }
+    // BUG FIX (Windows "spawn ... yt-dlp_bin ENOENT"): the path we resolved
+    // via ensureYtDlp() existed at that moment but is gone by the time we
+    // actually spawn it — almost always antivirus (Windows Defender is the
+    // usual culprit) quarantining/deleting an unsigned binary out of
+    // %TEMP% behind our back. Instead of letting this raw, unhelpful
+    // `spawn <path> ENOENT` reach the frontend (which is exactly the
+    // symptom being reported), force a fresh re-download and retry once.
+    if (err && err.code === "ENOENT") {
+      console.warn(
+        "[ytdlp] spawn ENOENT for " + ytdlpPath + " — binary vanished after " +
+          "resolution (commonly antivirus removing it from the temp folder " +
+          "on Windows). Forcing a fresh download and retrying once..."
+      );
+      ytdlpPath = await ensureYtDlp({ forceRedownload: true });
       return await spawnYtDlpOnce(ytdlpPath, args);
     }
     throw err;
