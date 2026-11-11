@@ -502,8 +502,52 @@ export async function spawnYtDlp(args) {
 }
 
 
+// Shared by every function (search, lyrics, stream, playlists, ...). HEAD and
+// Range are included so <audio> preflights/seeks and the new Recommended-mode
+// frontend work cross-origin; Expose-Headers lets the player read Content-Range.
 export const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type",
+  "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Range",
+  "Access-Control-Expose-Headers": "Content-Range, Accept-Ranges, Content-Length",
+  "Access-Control-Max-Age": "86400",
+};
+
+// ---------------------------------------------------------------------------
+// Recommended-mode data (mirrors the constants in src/components/Dashboard.jsx,
+// which cannot import this file because it pulls in Node-only modules).
+// "kavin.rocks" is the Piped web UI; the API host is pipedapi.kavin.rocks.
+// ---------------------------------------------------------------------------
+export const PIPED_API_INSTANCES = [
+  "https://pipedapi.kavin.rocks",
+  "https://pipedapi.adminforge.de",
+  "https://api.piped.private.coffee",
+  "https://pipedapi.leptons.xyz",
+  "https://piped-api.garudalinux.org",
+];
+
+export const RECOMMENDED_SEED_QUERIES = [
+  "bollywood hits", "arijit singh", "kishore kumar", "mohammed rafi", "lata mangeshkar",
+  "ghazal jagjit singh", "sufi songs", "90s bollywood romantic", "old hindi classics", "hindi lofi",
+];
+
+/** Piped search/trending item -> the flat card shape the dashboard renders. */
+export function normalizePipedItem(it) {
+  const id = /[?&]v=([\w-]{11})/.exec(it?.url || "")?.[1];
+  if (!id) return null;
+  return {
+    id,
+    title: it.title || "Untitled",
+    subtitle: (it.uploaderName || "Unknown artist").replace(/\s*-\s*Topic$/i, ""),
+    durationSeconds: it.duration > 0 ? it.duration : null,
+    thumbnailUrl: it.thumbnail || null,
+  };
+}
+
+// Offline fixture in Piped's real response shape, for tests / local UI work.
+export const SIMULATED_PIPED_RESPONSE = {
+  items: [
+    { type: "stream", url: "/watch?v=dQw4w9WgXcQ", title: "Sample Track", uploaderName: "Sample Artist - Topic", duration: 213, thumbnail: "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg" },
+  ],
+  nextpage: null,
 };

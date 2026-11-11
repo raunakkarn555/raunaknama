@@ -310,3 +310,24 @@ itself is never in the frontend code or bundle.
   expires. A different browser/device (no cookie yet) is always asked.
 
 Have fun with it 💈
+
+---
+
+## Stream resolver (how tracks get a playable URL)
+
+`/api/stream` (fast path) runs, in order:
+
+1. **youtubei.js tier 1** — `ANDROID_VR` + `TV` raced (3.5 s cap)
+2. **youtubei.js tier 2** — `IOS` + `MWEB` + `WEB_EMBEDDED` (only if tier 1 got nothing)
+3. legacy raw InnerTube clients (last resort), then yt-dlp from the browser side
+
+In parallel, public **Piped** instances are asked for a proxied (not IP-bound)
+audio URL. It is sent to the browser as `fallbacks[]`; if the primary URL gives
+a 403 / doesn't start within 4 s, the player switches to it without skipping,
+then re-fetches with `?fallback=true` (Piped first), and only then skips.
+
+`youtube_explode_dart` is Dart-only, so `youtubei.js` is used as its Node equivalent.
+
+**Local test:** `npm run dev` (netlify dev, http://localhost:8888), and
+`npm run test:resolver` / `node test-resolver.mjs [videoId ...]` to check 5 songs:
+resolve time in ms + Range-request (200/206) playability. Config: `.env.example`.

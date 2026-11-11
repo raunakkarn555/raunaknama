@@ -1,5 +1,7 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import Player from './components/Player';
+import { RecommendedGrid } from './components/Dashboard';
+import { warmStream } from './streamClient';
 import './App.css';
 
 const TOTAL_BG_PHOTOS = 40;
@@ -194,6 +196,68 @@ const HamburgerIcon = ({ open }) => (
   </svg>
 );
 
+// "Mode" dropdown that sits in the nav where the clock used to be.
+// Default = the original Player-only home screen; Recommended = adds the
+// unlimited Piped card grid under the player. The player itself never changes.
+const MODE_OPTIONS = [
+  { id: 'default', label: 'Default' },
+  { id: 'recommended', label: 'Recommended' },
+];
+
+function ModeMenu({ mode, onChange }) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const onDown = (e) => { if (!rootRef.current?.contains(e.target)) setOpen(false); };
+    const onKey = (e) => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('pointerdown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('pointerdown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  const current = MODE_OPTIONS.find((m) => m.id === mode) || MODE_OPTIONS[0];
+
+  return (
+    <div className="mode-menu" ref={rootRef}>
+      <button
+        type="button"
+        className={`mode-menu-btn ${open ? 'is-open' : ''}`}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        onClick={() => setOpen((o) => !o)}
+        title={`Mode: ${current.label}`}
+      >
+        <span className="mode-menu-label">Mode</span>
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <polyline points="6 9 12 15 18 9" />
+        </svg>
+      </button>
+      {open && (
+        <ul className="mode-menu-list" role="listbox" aria-label="Mode">
+          {MODE_OPTIONS.map((m) => (
+            <li key={m.id} role="option" aria-selected={m.id === mode}>
+              <button
+                type="button"
+                className={`mode-menu-item ${m.id === mode ? 'is-active' : ''}`}
+                onClick={() => { onChange(m.id); setOpen(false); }}
+              >
+                {m.label}
+                {m.id === mode && <span aria-hidden="true">✓</span>}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 // Live clock for the nav — purely presentational, ticks every second.
 function NavClock() {
   const [now, setNow] = useState(() => new Date());
@@ -219,8 +283,14 @@ function NavClock() {
 }
 
 function App() {
+  const [mode, setMode] = useState('default'); // 'default' | 'recommended'
+  const [playRequest, setPlayRequest] = useState(null);
+  const [currentTrackId, setCurrentTrackId] = useState(null);
   const [menuOpen, setMenuOpen] = useState(false);
-  const [bgIndex, setBgIndex] = useState(1);
+  const [bgIndex, setBgIndex] = useState(() => {
+    const mobile = typeof window !== 'undefined' && window.matchMedia(MOBILE_BREAKPOINT_QUERY).matches;
+    return 1 + Math.floor(Math.random() * (mobile ? TOTAL_BG_PHOTOS_MOBILE : TOTAL_BG_PHOTOS));
+  });
 
   // Tracks whether we're on a mobile-sized viewport so the backdrop can
   // switch to the photo set saved in assets/mobile. Desktop/tablet/laptop
@@ -248,8 +318,37 @@ function App() {
   // Called by Player whenever the currently-playing track changes (new
   // song, next, previous, autoplay chain, etc.) — purely additive, doesn't
   // touch any of Player's own playback logic.
+  // Random order, no repeats: a shuffled "deck" of every photo is dealt one
+  // by one, and only reshuffled once all photos have been shown (the first
+  // photo of a new deck is never the one that was just on screen).
+  const bgDeckRef = useRef({ total: 0, cards: [] });
   const advanceBackground = useCallback(() => {
-    setBgIndex((prev) => (prev % totalBgPhotos) + 1);
+    setBgIndex((prev) => {
+      const deck = bgDeckRef.current;
+      if (deck.total !== totalBgPhotos) {
+        deck.total = totalBgPhotos;
+        deck.cards = [];
+      }
+      if (!deck.cards.length) {
+        const cards = Array.from({ length: totalBgPhotos }, (_, i) => i + 1);
+        for (let i = cards.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          [cards[i], cards[j]] = [cards[j], cards[i]];
+        }
+        if (cards.length > 1 && cards[cards.length - 1] === prev) {
+          const k = Math.floor(Math.random() * (cards.length - 1));
+          [cards[cards.length - 1], cards[k]] = [cards[k], cards[cards.length - 1]];
+        }
+        deck.cards = cards;
+      }
+      let next = deck.cards.pop();
+      if (next === prev && deck.cards.length) {
+        const alt = deck.cards.pop();
+        deck.cards.push(next);
+        next = alt;
+      }
+      return next;
+    });
   }, [totalBgPhotos]);
 
   // Re-tint the player orb to match whichever backdrop photo is now
@@ -351,6 +450,19 @@ function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, [toggleFullscreen]);
 
+  const handleTrackChange = useCallback((id) => {
+    setCurrentTrackId(id);
+    advanceBackground(id);
+  }, [advanceBackground]);
+
+  // A recommended card was clicked: hand the track to the (unchanged) Player.
+  const playRecommended = useCallback((t) => {
+    setPlayRequest({
+      track: { id: t.id, title: t.title, channel: t.channel, duration: t.durationSeconds },
+      nonce: Date.now(),
+    });
+  }, []);
+
   return (
     <div className="App shell">
       {/* Full-bleed photo backdrop — swaps to a new frame from /bg on every
@@ -388,6 +500,7 @@ function App() {
 
         <div className="topbar-right">
           <NavClock />
+          <ModeMenu mode={mode} onChange={setMode} />
           <div className="listener-pill">
             <span className="dot" aria-hidden="true" />
             <span>On Air</span>
@@ -406,11 +519,21 @@ function App() {
 
       <main className="stage">
         <Player
-          onTrackChange={advanceBackground}
+          onTrackChange={handleTrackChange}
+          playRequest={playRequest}
           menuOpen={menuOpen}
           onCloseMenu={closeMenu}
           backgroundImageUrl={isMobile ? `/bg/mobile/${bgIndex}.jpg` : `/bg/${bgIndex}.jpg`}
         />
+        {mode === 'recommended' && (
+          <div className="reco-embed dash">
+            <RecommendedGrid
+              currentId={currentTrackId}
+              onSelect={playRecommended}
+              onWarm={(t) => warmStream(t.id)}
+            />
+          </div>
+        )}
       </main>
 
       <div className="site-footer">

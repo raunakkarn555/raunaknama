@@ -1,170 +1,110 @@
-import {
-  streamUrlCache,
-  getCached,
-  setCached,
-  authArgs,
-  spawnYtDlp,
-  cookieAwareErrorDetails,
-  STREAM_CACHE_TTL_MS,
-  CORS_HEADERS,
-} from "./_shared/ytdlpService.mjs";
+import { resolveStreamFast } from "./_shared/streamResolver.mjs";
 
-// Format selector, in priority order:
-//   1. m4a audio that is NOT served over HLS ([protocol!*=m3u8]) — this is
-//      the fast path: a single progressive/DASH URL the <audio> element (or
-//      a direct fetch) can play with zero extra JS.
-//   2. Any other non-HLS bestaudio (webm/opus etc).
-//   3. As of 2026, YouTube increasingly only exposes audio via HLS for a
-//      growing share of videos (anti-bot hardening removed the old
-//      direct-URL formats for those). If that's all that's available, fall
-//      back to bestaudio even if it IS HLS — the frontend knows how to play
-//      that via hls.js, it's just a different code path.
-//   4. Last resort: "best" (a combined video+audio format). A handful of
-//      videos expose no audio-ONLY format to any client at all (yt-dlp then
-//      errors with "Requested format is not available" even on "bestaudio",
-//      which was previously the end of the chain and left those tracks
-//      completely unplayable). An <audio>/<video> element can still play
-//      just the audio track out of a combined file, so this recovers those
-//      tracks instead of failing outright.
-const FORMAT_SELECTOR =
-  "ba[ext=m4a][protocol!*=m3u8]/ba[protocol!*=m3u8]/ba[ext=m4a]/bestaudio/best";
+// GET /api/stream?token=<mediaId>
+//   -> 302/307 redirect to the highest-bitrate audio URL. Node never touches
+//      the audio bytes: the browser's <audio> element follows the redirect and
+//      issues its own Range requests (RFC 7233) straight to the CDN.
+//
+// GET /api/stream?id=<mediaId>   (legacy)
+//   -> the old yt-dlp JSON response, so the existing Player.jsx keeps working
+//      until it is migrated. The yt-dlp code is only loaded on that path.
 
-function isHlsFormat(info) {
-  const protocol = String(info?.protocol || "");
-  const url = String(info?.url || "");
-  return protocol.includes("m3u8") || url.includes(".m3u8") || info?.ext === "m3u8";
+const REDIRECT_STATUS = Number(process.env.STREAM_REDIRECT_STATUS) === 307 ? 307 : 302;
+const CACHE_TTL_MS = 90 * 60 * 1000; // googlevideo URLs live ~6h
+const MAX_CACHE_ENTRIES = 500;
+
+const CORS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+  "Access-Control-Allow-Headers": "Range, Content-Type",
+  "Access-Control-Expose-Headers": "Content-Range, Accept-Ranges, Content-Length",
+};
+
+const cache = new Map(); // token -> { url, client, fallbacks, expires }
+const inflight = new Map(); // key -> Promise<{url, client}|null>
+
+// `fresh` bypasses the cache (a URL that just failed in the browser must not
+// be handed out again) and `exclude` skips the client that produced it.
+function resolveUrl(token, { fresh = false, exclude = [], fallback = false } = {}) {
+  if (!fresh) {
+    const hit = cache.get(token);
+    if (hit && hit.expires > Date.now()) return Promise.resolve({ url: hit.url, client: hit.client, fallbacks: hit.fallbacks || [] });
+  }
+
+  // Concurrent clicks/hover-warmups for the same track share one upstream call.
+  const key = fresh ? `${token}#fresh#${fallback ? "fb#" : ""}${exclude.join(",")}` : token;
+  if (inflight.has(key)) return inflight.get(key);
+
+  const p = resolveStreamFast(token, {
+    exclude,
+    fallback,
+    // Piped answered after we already replied: attach it to the cached entry
+    // so the next request for this track carries a backup URL.
+    onLateFallback: (list) => {
+      const e = cache.get(token);
+      if (e && !(e.fallbacks || []).length) e.fallbacks = list;
+    },
+  })
+    .then((hit) => {
+      if (hit) {
+        if (cache.size >= MAX_CACHE_ENTRIES) cache.delete(cache.keys().next().value);
+        cache.set(token, { ...hit, expires: Date.now() + CACHE_TTL_MS });
+      }
+      return hit;
+    })
+    .finally(() => inflight.delete(key));
+
+  inflight.set(key, p);
+  return p;
 }
+
+const json = (statusCode, body) => ({
+  statusCode,
+  headers: { "Content-Type": "application/json", ...CORS },
+  body: JSON.stringify(body),
+});
 
 export const handler = async (event) => {
   if (event.httpMethod === "OPTIONS") {
-    return { statusCode: 204, headers: CORS_HEADERS, body: "" };
+    return { statusCode: 204, headers: CORS, body: "" };
   }
 
-  const { id, retry } = event.queryStringParameters || {};
+  const { token, id, json: wantJson, fresh, exclude, fallback } = event.queryStringParameters || {};
 
-  if (!id) {
-    return {
-      statusCode: 400,
-      headers: { "Content-Type": "application/json", ...CORS_HEADERS },
-      body: JSON.stringify({ error: "Track ID parameter required" }),
-    };
+  if (!token && id) {
+    const legacy = await import("./_shared/legacyStream.mjs");
+    return legacy.handler(event);
   }
-
-  // A forced retry (frontend calls this after a resolved URL turned out to
-  // be unplayable in the browser — throttled/gated CDN URL, a known
-  // YouTube anti-bot pattern) deliberately skips the cache: the whole point
-  // is to get a different, hopefully-working result instead of the same
-  // broken one.
-  const isRetry = retry === "1";
-
-  const cached = isRetry ? null : getCached(streamUrlCache, id);
-  if (cached) {
-    return {
-      statusCode: 200,
-      headers: { "Content-Type": "application/json", ...CORS_HEADERS },
-      body: JSON.stringify(cached),
-    };
-  }
-
-  const videoUrl = `https://www.youtube.com/watch?v=${id}`;
-  console.log(`Extracting audio stream info for track ID: ${id}${isRetry ? " (forced retry)" : ""}`);
-
-  // BUG FIX (root cause of the widespread "Requested format is not
-  // available" failures reported Sept 2026): this used to hardcode
-  // `--extractor-args youtube:player_client=ios,android` (and
-  // `ios,android,tv_embedded` on retry). That made sense when it was
-  // written, but YouTube's PO-token enforcement has since expanded to
-  // cover the `ios` and `android` clients' format URLs too — as of mid/late
-  // 2026 both clients frequently return zero downloadable formats without a
-  // GVS PO token yt-dlp has no way to supply here, which is exactly what
-  // "Requested format is not available" means (the FORMAT_SELECTOR's whole
-  // chain, down to plain "best", had nothing to match against because the
-  // *format list itself* came back empty for those clients). This bit
-  // everyone, not just some tracks, which is why it reproduced on every
-  // video ID.
-  //
-  // The fix is to stop hardcoding a client list at all and let yt-dlp use
-  // its own built-in default (currently `tv,ios,web`, or `tv,web` when
-  // cookies are present) — exactly the reasoning already documented on
-  // authArgs() above, which this handler was inconsistently overriding.
-  // yt-dlp's maintainers update that default with every release specifically
-  // to track which clients still serve PO-token-free formats, and we always
-  // run the latest nightly build (see scripts/download-ytdlp.mjs), so
-  // deferring to it keeps this working without needing another manual fix
-  // the next time YouTube shifts the goalposts.
-  //
-  // On a forced retry we do still override, but with "mweb" — the client
-  // yt-dlp's own PO-token guide currently recommends as the fallback when
-  // the default clients are having trouble, and one that benefits most from
-  // the cookies we already attach via authArgs().
-  const args = [
-    "-f", FORMAT_SELECTOR,
-    "-j", // dump-json: gives us both the resolved URL and its protocol/ext
-    "--no-warnings",
-    ...(isRetry ? ["--extractor-args", "youtube:player_client=mweb,tv_embedded"] : []),
-    ...authArgs(),
-    videoUrl,
-  ];
 
   try {
-    const { code, stdoutData, stderrData } = await spawnYtDlp(args);
+    const hit = await resolveUrl(String(token || ""), {
+      fresh: fresh === "1" || fallback === "true",
+      fallback: fallback === "true",
+      exclude: exclude ? String(exclude).split(",").filter(Boolean) : [],
+    });
+    if (!hit) return json(404, { error: "No audio format available for this track" });
+    const { url, client, fallbacks = [] } = hit;
 
-    if (code !== 0 || !stdoutData.trim()) {
-      console.error(`Error resolving audio stream for track ${id}:`, stderrData);
-      return {
-        statusCode: 502,
-        headers: { "Content-Type": "application/json", ...CORS_HEADERS },
-        body: JSON.stringify({
-          error: "Failed to extract playable audio stream for this track",
-          details: cookieAwareErrorDetails(stderrData),
-        }),
-      };
+    // ?json=1 -> same fast resolver, but hands the URL back as JSON so the
+    // player can set audio.src itself (and cache it) instead of following a redirect.
+    if (wantJson) {
+      const res = json(200, { url, type: "direct", source: "fast", client, fallbacks: fallbacks.map((f) => ({ url: f.url, type: "direct", client: f.client })) });
+      // A forced/fresh lookup must never be served from a browser/CDN cache.
+      res.headers["Cache-Control"] = fresh === "1" || fallback === "true" ? "no-store" : "private, max-age=300";
+      return res;
     }
-
-    let info;
-    try {
-      info = JSON.parse(stdoutData.trim().split("\n")[0]);
-    } catch (parseErr) {
-      console.error(`Failed to parse yt-dlp JSON for track ${id}:`, parseErr.message);
-      return {
-        statusCode: 502,
-        headers: { "Content-Type": "application/json", ...CORS_HEADERS },
-        body: JSON.stringify({ error: "Could not parse stream info from yt-dlp" }),
-      };
-    }
-
-    if (!info?.url) {
-      return {
-        statusCode: 502,
-        headers: { "Content-Type": "application/json", ...CORS_HEADERS },
-        body: JSON.stringify({ error: "yt-dlp did not return a playable URL" }),
-      };
-    }
-
-    const payload = {
-      url: info.url,
-      type: isHlsFormat(info) ? "hls" : "direct",
-      ext: info.ext || null,
-    };
-
-    // Cache resolved stream info for 2 hours (YouTube CDN URLs last ~6h).
-    setCached(streamUrlCache, id, payload, STREAM_CACHE_TTL_MS);
 
     return {
-      statusCode: 200,
-      headers: { "Content-Type": "application/json", ...CORS_HEADERS },
-      body: JSON.stringify(payload),
+      statusCode: REDIRECT_STATUS,
+      headers: {
+        Location: url,
+        // Lets the browser skip this function entirely on a repeat click.
+        "Cache-Control": "private, max-age=300",
+        ...CORS,
+      },
+      body: "",
     };
   } catch (err) {
-    // Without this catch, a rejected promise here (e.g. the yt-dlp binary
-    // bootstrap failing) crashes the whole invocation and Netlify returns a
-    // generic HTML error page — which is what broke JSON parsing on the
-    // frontend. Always return real JSON instead.
-    console.error(`Unhandled stream error for track ${id}:`, err);
-    return {
-      statusCode: err.status || 500,
-      headers: { "Content-Type": "application/json", ...CORS_HEADERS },
-      body: JSON.stringify({ error: err.message || "Unexpected streaming error" }),
-    };
+    return json(err.statusCode === 400 ? 400 : 502, { error: err.message });
   }
 };

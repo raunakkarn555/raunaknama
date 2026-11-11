@@ -16,12 +16,17 @@ import {
 // what makes prev/next feel instant instead of waiting on yt-dlp again.
 const CLIENT_STREAM_CACHE_TTL_MS = 100 * 60 * 1000;
 
+import { fetchStream, warmStream, peekStream } from "../streamClient";
+import ArtistPage, { ArtistSearchCard } from "./ArtistPage";
+
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
 
 // Crossfade duration between tracks — the outgoing track fades out on a
 // secondary <audio> element while the incoming one fades in on the primary
 // element, so there's real overlap instead of a hard cut.
 const CROSSFADE_MS = 1500;
+// Incoming tracks ramp up quickly so a pick is audible right away.
+const FADE_IN_MS = 350;
 
 // How many seconds before a track's natural end we proactively advance to
 // the next track (see the "gapless background advance" note above
@@ -108,6 +113,58 @@ const rampAudioVolume = (el, from, to, durationMs, rafRef, onDone) => {
   rafRef.current = requestAnimationFrame(step);
 };
 
+// Lock-screen / notification artwork. Phones draw this in a square slot, and
+// a tall portrait wallpaper declared as "512x512" (or mixed in with the app
+// icons) often ends up ignored or replaced by the icon. So: centre-crop the
+// current wallpaper to a real 512x512 JPEG once, and hand that to the Media
+// Session under every size the OS may ask for. Cached per wallpaper URL.
+const squareArtworkCache = new Map(); // url -> Promise<string|null>
+const makeSquareArtwork = (url, size = 512) => {
+  if (!url || typeof document === "undefined") return Promise.resolve(null);
+  if (squareArtworkCache.has(url)) return squareArtworkCache.get(url);
+  const p = new Promise((resolve) => {
+    const img = new Image();
+    img.decoding = "async";
+    img.onload = () => {
+      try {
+        const side = Math.min(img.naturalWidth, img.naturalHeight);
+        if (!side) return resolve(null);
+        const canvas = document.createElement("canvas");
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(
+          img,
+          (img.naturalWidth - side) / 2,
+          (img.naturalHeight - side) / 2,
+          side,
+          side,
+          0,
+          0,
+          size,
+          size
+        );
+        canvas.toBlob(
+          (blob) => resolve(blob ? URL.createObjectURL(blob) : canvas.toDataURL("image/jpeg", 0.85)),
+          "image/jpeg",
+          0.85
+        );
+      } catch (err) {
+        resolve(null);
+      }
+    };
+    img.onerror = () => resolve(null);
+    img.src = url;
+  });
+  squareArtworkCache.set(url, p);
+  return p;
+};
+const ARTWORK_SIZES = ["96x96", "128x128", "192x192", "256x256", "384x384", "512x512"];
+
+// Never show tool / provider names in the UI.
+const scrubBrand = (text) =>
+  String(text ?? "").replace(/yt-?dlp/gi, "the streaming service").replace(/youtube/gi, "the source");
+
 const formatTime = (secs) => {
   if (!secs || Number.isNaN(secs) || !Number.isFinite(secs)) return "0:00";
   const m = Math.floor(secs / 60);
@@ -139,6 +196,29 @@ const shuffledIndices = (length) => {
   }
   return arr;
 };
+
+const BackIcon = () => (
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M19 12H5" /><path d="M12 19l-7-7 7-7" />
+  </svg>
+);
+
+// Cover art with a graceful fallback chain (hq720 -> hqdefault -> placeholder).
+const COVER_SIZES = ["hq720", "hqdefault", "mqdefault"];
+function SearchCover({ id }) {
+  const [step, setStep] = useState(0);
+  if (step >= COVER_SIZES.length) return <span className="sp-cover-fallback" aria-hidden="true">♪</span>;
+  return (
+    <img
+      src={`https://i.ytimg.com/vi/${id}/${COVER_SIZES[step]}.jpg`}
+      alt=""
+      loading="lazy"
+      decoding="async"
+      referrerPolicy="no-referrer"
+      onError={() => setStep((n) => n + 1)}
+    />
+  );
+}
 
 const PlayIcon = () => (
   <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor" aria-hidden="true">
@@ -200,6 +280,16 @@ const AutoplayIcon = () => (
     <path d="M3 11V9a4 4 0 0 1 4-4h14" />
     <path d="M7 22l-4-4 4-4" />
     <path d="M21 13v2a4 4 0 0 1-4 4H3" />
+  </svg>
+);
+
+const RepeatOneIcon = () => (
+  <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M17 2l4 4-4 4" />
+    <path d="M3 11V9a4 4 0 0 1 4-4h14" />
+    <path d="M7 22l-4-4 4-4" />
+    <path d="M21 13v2a4 4 0 0 1-4 4H3" />
+    <path d="M11 10l1.5-1v6" />
   </svg>
 );
 
@@ -514,7 +604,7 @@ const savePlaybackState = (state) => {
   }
 };
 
-export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroundImageUrl }) {
+export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroundImageUrl, playRequest }) {
   // Read once, synchronously, before any state is seeded below — several
   // pieces of initial state (active playlist, track index, search pick,
   // volume) fall back to whatever was saved here so playback can resume.
@@ -542,6 +632,9 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
   // playing automatically, whether the current track came from a playlist
   // or from a search pick.
   const [autoplay, setAutoplay] = useState(true);
+  // Repeat-one: loops the current song natively (audio.loop), which keeps
+  // working with the screen locked because no JS has to run at the loop point.
+  const [repeatOne, setRepeatOne] = useState(false);
 
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState([]);
@@ -600,8 +693,9 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
   // over (or silently not show up in) the main player UI.
   const [toasts, setToasts] = useState([]);
   const toastIdRef = useRef(0);
-  const pushToast = useCallback((message, type = "error", durationMs = 4500) => {
-    if (!message) return;
+  const pushToast = useCallback((rawMessage, type = "error", durationMs = 4500) => {
+    if (!rawMessage) return;
+    const message = scrubBrand(rawMessage);
     const id = ++toastIdRef.current;
     setToasts((prev) => [...prev, { id, message, type }]);
     setTimeout(() => {
@@ -660,6 +754,7 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
   const [showSleepTimerModal, setShowSleepTimerModal] = useState(false);
   const [customSleepMinutes, setCustomSleepMinutes] = useState("");
   const sleepTimerTimeoutRef = useRef(null);
+  const sleepEndAtRef = useRef(null); // wall-clock end time; checked from audio events too, since a setTimeout alone can be delayed/skipped on a locked phone
 
   const audioRef = useRef(null);
   // ---------- Crossfade ----------
@@ -674,10 +769,28 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
   const importFileInputRef = useRef(null); // hidden <input type="file"> for restoring a local-playlists backup
   const consecutiveFailures = useRef(0);
   const hlsRef = useRef(null);
+  const handleAudioErrorRef = useRef(null); // always points at the latest handleAudioError (used by the load watchdog)
   const streamCacheRef = useRef(new Map()); // trackId -> { data: {url,type}, expires }
   const loadTokenRef = useRef(0); // guards against a stale resolve landing after a newer track switch
   const autoplayHistoryRef = useRef(new Set()); // recently auto-played track ids, so the "similar songs" chain doesn't immediately repeat itself
-  const retriedTrackIdsRef = useRef(new Set()); // track ids that already got one forced (cache-bypassing) re-resolve after a playback failure
+  const retriedTrackIdsRef = useRef(new Map()); // track id -> number of forced (cache-bypassing) re-resolves already spent after playback failures
+  const currentTrackIdRef = useRef(null); // latest track id, readable from async callbacks
+  const preAttachedIdRef = useRef(null); // id of a track whose stream was already attached synchronously inside the "ended" event (see tryInstantAdvance) — the load effect must not redo it
+  const altTriedRef = useRef(new Set()); // track ids that already got the "play another upload of this song" last-resort fallback
+  const STREAM_STALL_MS = 4000; // no playable data after this long => retry via another client
+  const MAX_FORCED_RETRIES = 3; // each retry asks a different extraction client / path before we give up on a track
+  const backupStreamsRef = useRef({ id: null, list: [] }); // backup URLs (Piped-proxied) for the current track, tried before any forced re-resolve / skip
+  const takeBackupStream = (id) => {
+    const b = backupStreamsRef.current;
+    if (!id || b.id !== id || !b.list.length) return null;
+    return b.list.shift();
+  };
+  const takeForcedRetry = (id) => {
+    const used = retriedTrackIdsRef.current.get(id) || 0;
+    if (used >= MAX_FORCED_RETRIES) return false;
+    retriedTrackIdsRef.current.set(id, used + 1);
+    return true;
+  };
   const prefetchedAutoplayRef = useRef(null); // { seedId, track } — the next "similar songs" autoplay pick, looked up + stream-resolved ahead of time
   const pendingBackgroundResumeRef = useRef(false); // true while we're waiting for the tab to come back to the foreground before retrying a failed resolve (see handleStreamFailure)
   const earlyAdvanceFiredRef = useRef(false); // guards the gapless early-advance (see handleTimeUpdate) from firing twice, and from double-firing alongside the real 'ended' event
@@ -921,7 +1034,12 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
         )
         .then((results) => {
           rawSearchResultsRef.current = results;
-          setSearchResults(rankSearchResults(results, searchQuery));
+          const ranked = rankSearchResults(results, searchQuery);
+          setSearchResults(ranked);
+          // Pre-resolve the first few results so tapping one starts right away.
+          ranked.slice(0, 3).forEach((t, i) => {
+            if (t?.id) setTimeout(() => warmStream(t.id), i * 300);
+          });
         })
         .catch((err) => {
           console.error("Search error:", err);
@@ -953,44 +1071,7 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
   // Resolves a track ID to { url, type: "direct"|"hls" }, via an in-memory
   // client-side cache first (instant, no network at all) and falling back
   // to /api/stream (which has its own server-side cache on top of yt-dlp).
-  const resolveStream = useCallback((trackId, { forceRefresh = false } = {}) => {
-    if (!forceRefresh) {
-      const cached = streamCacheRef.current.get(trackId);
-      if (cached && cached.expires > Date.now()) {
-        return Promise.resolve(cached.data);
-      }
-    }
-    const streamUrl = forceRefresh
-      ? `${API_BASE}/api/stream?id=${trackId}&retry=1`
-      : `${API_BASE}/api/stream?id=${trackId}`;
-    return fetch(streamUrl)
-      .then((res) => {
-        if (!res.ok) {
-          return res
-            .json()
-            .catch(() => ({}))
-            .then((body) => {
-              // Keep both the short error and the raw yt-dlp details (when
-              // present) so the console shows the *actual* reason a stream
-              // failed to resolve — e.g. "YouTube blocked server IP. Please
-              // set YTDLP_COOKIES_B64..." — instead of a vague generic
-              // message that hides what's actually wrong.
-              const err = new Error(body.error || `Stream resolve failed (${res.status})`);
-              err.details = body.details;
-              throw err;
-            });
-        }
-        return res.json();
-      })
-      .then((data) => {
-        if (!data.url) throw new Error("No stream URL returned");
-        streamCacheRef.current.set(trackId, {
-          data,
-          expires: Date.now() + CLIENT_STREAM_CACHE_TTL_MS,
-        });
-        return data;
-      });
-  }, []);
+  const resolveStream = useCallback((trackId, opts) => fetchStream(trackId, opts), []);
 
   // Attaches a resolved stream ({ url, type }) to the <audio> element and
   // starts playback if this is still the current load (guarded by token).
@@ -1002,6 +1083,15 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
   const attachStreamAndPlay = (data, token, wantsPlay = true) => {
     const audio = audioRef.current;
     if (!audio || token !== loadTokenRef.current) return;
+
+    // Remember the backend's backup URLs for this track. A backup being
+    // attached itself (`__backup`) must not reset the remaining queue.
+    if (!data.__backup) {
+      backupStreamsRef.current = {
+        id: currentTrackIdRef.current,
+        list: Array.isArray(data.fallbacks) ? data.fallbacks.filter((f) => f?.url && f.url !== data.url) : [],
+      };
+    }
 
     if (hlsRef.current) {
       hlsRef.current.destroy();
@@ -1051,6 +1141,21 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
       audio.src = data.url;
       audio.load();
       playNow();
+
+      // Load watchdog: a CDN URL that never answers (throttled / dead) used to
+      // leave the player on "Loading…" for a minute. If nothing is playable
+      // after a few seconds, treat it like a playback error so the retry
+      // ladder (different extraction client) kicks in immediately.
+      if (wantsPlay) {
+        setTimeout(() => {
+          if (token !== loadTokenRef.current) return;
+          if (typeof document !== "undefined" && document.hidden) return;
+          const a = audioRef.current;
+          if (!a || a.error || a.paused || a.readyState >= 3) return;
+          console.warn("Stream stalled while loading — retrying with another source");
+          handleAudioErrorRef.current?.();
+        }, STREAM_STALL_MS);
+      }
     }
   };
 
@@ -1066,7 +1171,24 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
         : (currentIndex + 1) % playlist.tracks.length;
     const nextTrack = playlist.tracks[nextIdx];
     if (!nextTrack) return;
-    resolveStream(nextTrack.id).catch(() => {});
+    // A cached URL is what lets the next song start instantly even with the
+    // screen locked, so make sure it really lands: retry a failed prefetch
+    // once, and also warm the track after next.
+    let retryTimer = null;
+    resolveStream(nextTrack.id).catch(() => {
+      retryTimer = setTimeout(() => resolveStream(nextTrack.id, { forceRefresh: true }).catch(() => {}), 4000);
+    });
+    const order = shuffle && shuffleOrder.length ? shuffleOrder : null;
+    const afterIdx = order
+      ? order[(order.indexOf(currentIndex) + 2) % order.length]
+      : (currentIndex + 2) % playlist.tracks.length;
+    const afterTrack = playlist.tracks[afterIdx];
+    if (afterTrack && afterTrack.id !== nextTrack.id && afterTrack.id !== currentTrack?.id) {
+      setTimeout(() => resolveStream(afterTrack.id).catch(() => {}), 1500);
+    }
+    return () => {
+      if (retryTimer) clearTimeout(retryTimer);
+    };
   }, [playlist, currentIndex, shuffle, shuffleOrder, activeSource, resolveStream]);
 
   // 3. Managed Safe Audio Loading without Race Conditions.
@@ -1094,13 +1216,32 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
     let cancelled = false;
     earlyAdvanceFiredRef.current = false;
 
+    // The "ended" handler already swapped this track's stream in synchronously
+    // (so a locked phone never has to wait on React / the network) and started
+    // it — just refresh the UI state and leave the audio element alone.
+    if (preAttachedIdRef.current && preAttachedIdRef.current === currentTrack.id) {
+      preAttachedIdRef.current = null;
+      hasLoadedTrackRef.current = true;
+      setCurrentTime(0);
+      setDuration(0);
+      setPlaybackError(null);
+      setIsTrackLoading(false);
+      return () => {
+        cancelled = true;
+      };
+    }
+    preAttachedIdRef.current = null;
+
     // ---------- Crossfade out the previous track ----------
     // Only once we've already had a real track playing (never on the very
     // first load) — hand the outgoing audio's current position off to the
     // hidden secondary element, let it keep playing while it fades to
     // silence over CROSSFADE_MS, then mute the primary element so the
     // incoming track starts silent and ready to fade in once it's playing.
-    if (hasLoadedTrackRef.current && audio.src) {
+    // (Never while the tab is hidden/locked: a second element started from
+    // the background can be blocked, leaving the page completely silent —
+    // and a silent page is exactly when mobile browsers suspend it.)
+    if (hasLoadedTrackRef.current && audio.src && !document.hidden) {
       const outgoing = crossfadeAudioRef.current;
       if (outgoing) {
         try {
@@ -1147,8 +1288,7 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
         // giving up on this track.
         const isCookieError = err.details && /cookie|sign in to confirm/i.test(err.details);
         const trackId = currentTrack.id;
-        if (!isCookieError && trackId && !retriedTrackIdsRef.current.has(trackId)) {
-          retriedTrackIdsRef.current.add(trackId);
+        if (!isCookieError && trackId && takeForcedRetry(trackId)) {
           resolveStream(trackId, { forceRefresh: true })
             .then((data) => {
               if (cancelled || token !== loadTokenRef.current) return;
@@ -1246,6 +1386,8 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
     nativeMediaSessionInit();
   }, []);
 
+  currentTrackIdRef.current = currentTrack?.id || null;
+
   useEffect(() => {
     if (!currentTrack) return;
     const title = currentTrack.title || "Raunaknama";
@@ -1259,20 +1401,36 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
         // Same backdrop photo used for the native app's notification —
         // put it first so browsers that support MediaImage prefer it over
         // the static app icon fallback.
-        const artwork = [];
-        if (backgroundImageUrl) {
-          artwork.push({ src: backgroundImageUrl, sizes: "512x512", type: "image/jpeg" });
-        }
-        artwork.push(
+        const iconArtwork = [
           { src: "/icon-192.png", sizes: "192x192", type: "image/png" },
-          { src: "/icon-512.png", sizes: "512x512", type: "image/png" }
-        );
-        navigator.mediaSession.metadata = new window.MediaMetadata({
-          title,
-          artist,
-          album: "Raunaknama",
-          artwork,
-        });
+          { src: "/icon-512.png", sizes: "512x512", type: "image/png" },
+        ];
+        const publish = (wallpaperSrc, mime) => {
+          const artwork = wallpaperSrc
+            ? ARTWORK_SIZES.map((sizes) => ({ src: wallpaperSrc, sizes, type: mime }))
+            : iconArtwork;
+          navigator.mediaSession.metadata = new window.MediaMetadata({
+            title,
+            artist,
+            album: "Raunaknama",
+            artwork,
+          });
+        };
+        // Right away (never leave the shade without a title), with the raw
+        // wallpaper if there is one…
+        publish(backgroundImageUrl ? new URL(backgroundImageUrl, window.location.origin).href : null, "image/jpeg");
+        // …then upgrade to the properly square-cropped version.
+        if (backgroundImageUrl) {
+          const wanted = currentTrack.id;
+          makeSquareArtwork(backgroundImageUrl).then((squareSrc) => {
+            if (!squareSrc || currentTrackIdRef.current !== wanted) return;
+            try {
+              publish(squareSrc, squareSrc.startsWith("data:") ? "image/jpeg" : "image/jpeg");
+            } catch (err) {
+              // ignore
+            }
+          });
+        }
       } catch (err) {
         // Not supported in this browser — harmless to skip.
       }
@@ -1677,10 +1835,74 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
       return;
     }
 
+    // Last resort before giving up: the exact upload may be region/age/PO-token
+    // gated, but another upload of the same song (official audio, lyric video,
+    // "Topic" channel…) almost always plays. Look one up and play that instead
+    // of showing an error and skipping a song the listener asked for.
+    const failedTrack = currentTrack;
+    if (failedTrack?.id && !altTriedRef.current.has(failedTrack.id)) {
+      altTriedRef.current.add(failedTrack.id);
+      const token = ++loadTokenRef.current;
+      setIsTrackLoading(true);
+      setPlaybackError(null);
+      playAlternateVersion(failedTrack, token)
+        .then((ok) => {
+          if (token !== loadTokenRef.current) return;
+          if (!ok) {
+            setIsTrackLoading(false);
+            skipFailedTrack(message);
+          }
+        })
+        .catch(() => {
+          if (token !== loadTokenRef.current) return;
+          setIsTrackLoading(false);
+          skipFailedTrack(message);
+        });
+      return;
+    }
+
+    skipFailedTrack(message);
+  };
+
+  // Searches for another upload of the same song and plays it. Resolves true
+  // when a replacement stream was attached, false when nothing usable exists.
+  const playAlternateVersion = async (track, token) => {
+    const base = `${track.title || ""} ${track.channel || track.artist || track.subtitle || ""}`
+      .replace(/\(.*?\)|\[.*?\]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!base) return false;
+    const res = await fetch(`${API_BASE}/api/search?q=${encodeURIComponent(`${base} audio`)}`);
+    if (!res.ok) return false;
+    const data = await res.json();
+    const want = Number(track.duration) || 0;
+    const candidates = (data.results || []).filter((t) => {
+      if (!t?.id || t.id === track.id) return false;
+      if (altTriedRef.current.has(t.id)) return false;
+      const d = Number(t.duration) || 0;
+      if (want && d) return d >= want * 0.75 && d <= want * 1.35;
+      return !d || d <= 10 * 60;
+    });
+    for (const cand of candidates.slice(0, 3)) {
+      if (token !== loadTokenRef.current) return true; // user moved on; nothing more to do
+      try {
+        const stream = await resolveStream(cand.id);
+        if (token !== loadTokenRef.current) return true;
+        setIsTrackLoading(false);
+        attachStreamAndPlay(stream, token, true);
+        return true;
+      } catch {
+        // try the next candidate
+      }
+    }
+    return false;
+  };
+
+  const skipFailedTrack = (message) => {
     consecutiveFailures.current += 1;
-    if (consecutiveFailures.current > 3) {
+    if (consecutiveFailures.current > 5) {
       const stopMsg =
-        "Several tracks in a row failed to stream. The backend (yt-dlp) is likely blocked or down.";
+        "Several tracks in a row failed to play. The streaming service looks unavailable right now.";
       setPlaybackError(stopMsg);
       pushToast(stopMsg, "error", 6500);
       return;
@@ -1706,16 +1928,31 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
     // re-resolve using a different extraction client. That alone recovers
     // a large share of these failures without bothering the listener.
     const trackId = currentTrack?.id;
-    if (trackId && !retriedTrackIdsRef.current.has(trackId)) {
-      retriedTrackIdsRef.current.add(trackId);
+
+    // Step 1 — a 403 / dead URL (usually YouTube's IP-binding): switch to the
+    // backup stream the backend sent along (Piped-proxied) without skipping.
+    const backup = takeBackupStream(trackId);
+    if (backup) {
+      console.warn("Primary stream failed — switching to backup stream:", backup.client || "backup");
       const token = ++loadTokenRef.current;
+      setIsTrackLoading(true);
+      attachStreamAndPlay({ type: "direct", ...backup, __backup: true }, token, true);
+      return;
+    }
+
+    // Step 2 — re-fetch a fresh stream with ?fallback=true (see streamClient).
+    if (trackId && takeForcedRetry(trackId)) {
+      const token = ++loadTokenRef.current;
+      setIsTrackLoading(true);
       resolveStream(trackId, { forceRefresh: true })
         .then((data) => {
           if (token !== loadTokenRef.current) return;
+          setIsTrackLoading(false);
           attachStreamAndPlay(data, token, true);
         })
         .catch((err) => {
           if (token !== loadTokenRef.current) return;
+          setIsTrackLoading(false);
           // Bug: this used to log only err.message and always hand
           // handleStreamFailure a hardcoded generic string, discarding
           // err.details entirely. That meant the *real* reason (a timed-out
@@ -1739,8 +1976,15 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
     handleStreamFailure();
   };
 
+  handleAudioErrorRef.current = handleAudioError;
+
   const handleAudioPlaying = () => {
     consecutiveFailures.current = 0;
+    if (currentTrack?.id) {
+      retriedTrackIdsRef.current.delete(currentTrack.id);
+      altTriedRef.current.delete(currentTrack.id);
+    }
+    setIsTrackLoading(false);
     setPlaybackError(null);
     setIsPlaying(true);
 
@@ -1752,7 +1996,7 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
       pendingFadeInRef.current = false;
       const audio = audioRef.current;
       if (audio) {
-        rampAudioVolume(audio, 0, volume, CROSSFADE_MS, fadeInRafRef);
+        rampAudioVolume(audio, 0, volume, FADE_IN_MS, fadeInRafRef);
       }
     }
   };
@@ -1884,12 +2128,72 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
   // won't even fire it. This stays as a safety net for the rare case
   // duration was unknown/Infinity (e.g. a live/HLS edge case) so early
   // advance never got a chance to fire.
+  // Works out which track comes next (same rules the buttons / autoplay use)
+  // and, if its stream URL is already cached, attaches + starts it RIGHT NOW,
+  // synchronously, inside the "ended" event. A locked phone gives the page
+  // almost no time after audio stops — waiting for a React render and a
+  // network call is exactly where "next song never plays" came from.
+  const tryInstantAdvance = () => {
+    const audio = audioRef.current;
+    if (!audio) return;
+
+    let nextTrack = null;
+    if (activeSource === "search") {
+      const pre = prefetchedAutoplayRef.current;
+      if (pre && pre.seedId === currentTrack?.id) nextTrack = pre.track;
+    } else if (playlist && playlist.tracks.length > 1) {
+      const nextIdx =
+        shuffle && shuffleOrder.length
+          ? shuffleOrder[(shuffleOrder.indexOf(currentIndex) + 1) % shuffleOrder.length]
+          : (currentIndex + 1) % playlist.tracks.length;
+      nextTrack = playlist.tracks[nextIdx] || null;
+    }
+    if (!nextTrack) return;
+
+    const data = peekStream(nextTrack.id);
+    if (!data || data.type === "hls") return; // not cached (or needs hls.js) — normal path handles it
+
+    try {
+      if (hlsRef.current) {
+        hlsRef.current.destroy();
+        hlsRef.current = null;
+      }
+      loadTokenRef.current += 1;
+      preAttachedIdRef.current = nextTrack.id;
+      audio.volume = volume; // no fade ramps: they need rAF, which a hidden tab never gets
+      audio.src = data.url;
+      audio.load();
+      const p = audio.play();
+      if (p !== undefined) {
+        p.catch((err) => {
+          if (err.name === "AbortError") return;
+          console.warn("Instant advance play blocked:", err.message || err);
+          if (preAttachedIdRef.current === nextTrack.id) preAttachedIdRef.current = null;
+        });
+      }
+    } catch (err) {
+      preAttachedIdRef.current = null;
+    }
+  };
+
   const handleTrackEnded = () => {
+    // Timer already expired while this song was finishing → stop, don't advance.
+    if (checkSleepTimerRef.current?.()) return;
     if (earlyAdvanceFiredRef.current) return;
+    if (repeatOne) {
+      // Safety net — audio.loop normally handles this without an "ended" event.
+      const audio = audioRef.current;
+      if (audio) {
+        audio.currentTime = 0;
+        audio.play().catch(() => {});
+      }
+      return;
+    }
     if (!autoplay) {
       setIsPlaying(false);
       return;
     }
+    tryInstantAdvance();
     if (activeSource === "search") {
       playNextAutoplayTrack();
     } else {
@@ -1901,6 +2205,42 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
   const toggleAutoplay = () => {
     setAutoplay((prev) => !prev);
   };
+
+  const toggleRepeatOne = () => {
+    triggerHaptic();
+    setRepeatOne((prev) => !prev);
+  };
+
+  useEffect(() => {
+    if (audioRef.current) audioRef.current.loop = repeatOne;
+  }, [repeatOne]);
+
+  // ---------- Coming back to the app ----------
+  // If the track finished while the page was suspended (screen locked, other
+  // app in front) its "ended" event may have been missed — on return, move on
+  // instead of sitting on a finished song; and if the OS paused us without the
+  // listener asking for it, resume.
+  const resumeCheckRef = useRef(null);
+  resumeCheckRef.current = () => {
+    const audio = audioRef.current;
+    if (!audio || !currentTrack) return;
+    if (checkSleepTimerRef.current?.()) return;
+    if (document.hidden) return;
+    if (audio.ended && autoplay && !repeatOne && !earlyAdvanceFiredRef.current) {
+      handleTrackEnded();
+    }
+  };
+  useEffect(() => {
+    const run = () => resumeCheckRef.current?.();
+    document.addEventListener("visibilitychange", run);
+    window.addEventListener("pageshow", run);
+    window.addEventListener("focus", run);
+    return () => {
+      document.removeEventListener("visibilitychange", run);
+      window.removeEventListener("pageshow", run);
+      window.removeEventListener("focus", run);
+    };
+  }, []);
 
   const selectPlaylistTrack = (idx) => {
     setActiveSource("playlist");
@@ -1947,6 +2287,161 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
     setIsPlaying(true);
   };
 
+  // ---------- Search page (opens when the search bar is clicked) ----------
+  const [searchPageOpen, setSearchPageOpen] = useState(false);
+  const searchPageInputRef = useRef(null);
+
+  // Artist card (search) + artist page. `artistMatch` is the artist the current
+  // query refers to (null when the query is not an artist name).
+  const [artistMatch, setArtistMatch] = useState(null);
+  const [artistPage, setArtistPage] = useState(null);
+
+  const openArtistPage = (artist) => {
+    if (!artist) return;
+    window.history.pushState({ artistPage: true }, "");
+    setArtistPage(artist);
+  };
+  const closeArtistPage = () => {
+    if (window.history.state?.artistPage) window.history.back();
+    else setArtistPage(null);
+  };
+
+  // Look the query up as an artist (photo + bio) alongside the song search.
+  useEffect(() => {
+    const q = searchQuery.trim();
+    if (q.length < 2) {
+      setArtistMatch(null);
+      return undefined;
+    }
+    let cancelled = false;
+    const handle = setTimeout(() => {
+      fetch(`${API_BASE}/api/artist?q=${encodeURIComponent(q)}`)
+        .then((res) => (res.ok ? res.json() : { artist: null }))
+        .then((data) => { if (!cancelled) setArtistMatch(data?.artist || null); })
+        .catch(() => { if (!cancelled) setArtistMatch(null); });
+    }, 450);
+    return () => {
+      cancelled = true;
+      clearTimeout(handle);
+    };
+  }, [searchQuery]);
+
+  const openSearchPage = () => {
+    if (searchPageOpen || window.history.state?.searchPage) return; // onFocus + onClick both fire
+    window.history.pushState({ searchPage: true }, "");
+    setSearchPageOpen(true);
+  };
+  const closeSearchPage = () => {
+    if (window.history.state?.searchPage) window.history.back();
+    else setSearchPageOpen(false);
+  };
+
+  useEffect(() => {
+    // browser/phone Back button: close the artist page first (search stays
+    // open underneath), then the search page itself.
+    const onPop = () => {
+      const st = window.history.state;
+      if (!st?.artistPage) setArtistPage(null);
+      setSearchPageOpen(!!(st?.searchPage || st?.artistPage));
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
+
+  useEffect(() => {
+    if (!searchPageOpen) return undefined;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const focusTimer = setTimeout(() => searchPageInputRef.current?.focus(), 50);
+    const onKey = (e) => {
+      if (e.key !== "Escape" || window.history.state?.artistPage) return; // artist page handles its own Escape
+      closeSearchPage();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      document.body.style.overflow = prevOverflow;
+      clearTimeout(focusTimer);
+      window.removeEventListener("keydown", onKey);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchPageOpen]);
+
+  useEffect(() => {
+    if (!artistPage) return undefined;
+    const onKey = (e) => { if (e.key === "Escape") closeArtistPage(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [artistPage]);
+
+  const fmtDur = (d) => (typeof d === "number" && d > 0 ? formatTime(d) : typeof d === "string" ? d : "");
+
+  const renderSearchCard = (track, hero = false) => {
+    const isCurrent = currentTrack?.id === track.id;
+    const playing = isCurrent && isPlaying;
+    const liked = isTrackLiked(track.id);
+    return (
+      <div
+        key={track.id}
+        className={`sp-card ${hero ? "sp-card--hero" : ""} ${isCurrent ? "is-current" : ""}`}
+        onPointerEnter={() => warmStream(track.id)}
+        onTouchStart={() => warmStream(track.id)}
+      >
+        <button
+          type="button"
+          className="sp-hit"
+          onClick={() => playSearchResult(track)}
+          aria-label={`Play ${track.title}`}
+        >
+          <span className="sp-cover">
+            <SearchCover id={track.id} />
+            <span className="sp-play">{playing ? <PauseIcon /> : <PlayIcon />}</span>
+          </span>
+          <span className="sp-meta">
+            {track.playlistLabel && (
+              <span className="sp-badge"><PlaylistBadgeIcon /> {track.playlistLabel}</span>
+            )}
+            <span className="sp-title" title={track.title}>{track.title}</span>
+            <span className="sp-sub">
+              {track.channel && <span className="sp-channel">{track.channel}</span>}
+              {fmtDur(track.duration) && <span className="sp-dur">{fmtDur(track.duration)}</span>}
+            </span>
+          </span>
+        </button>
+        <div className="sp-actions">
+          <button
+            type="button"
+            className={`sp-act ${liked ? "is-liked" : ""}`}
+            aria-label={liked ? `Unlike ${track.title}` : `Like ${track.title}`}
+            onClick={() => toggleLikeTrack(track)}
+          >
+            <HeartIcon filled={liked} />
+          </button>
+          <button
+            type="button"
+            className="sp-act"
+            aria-label={`Save ${track.title} to a playlist`}
+            onClick={() => openAddToPlaylistPicker(track)}
+          >
+            <PlusIcon />
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  // Lets the host shell (App.jsx) start a track in this player — used by the
+  // "Recommended" mode cards. Plays exactly like a search pick: same dock,
+  // same controls, same stream resolution. `nonce` makes re-clicking the same
+  // track replay it.
+  useEffect(() => {
+    if (!playRequest?.track?.id) return;
+    setSearchTrack(playRequest.track);
+    setActiveSource("search");
+    setIsPlaying(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [playRequest?.nonce]);
+
   // ---------- Like / favorite ----------
   const isTrackLiked = useCallback(
     (trackId) => likedTracks.some((t) => t.id === trackId),
@@ -1970,6 +2465,7 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
 
   // ---------- Sleep timer ----------
   const clearSleepTimer = useCallback((notify = false) => {
+    sleepEndAtRef.current = null;
     if (sleepTimerTimeoutRef.current) {
       clearTimeout(sleepTimerTimeoutRef.current);
       sleepTimerTimeoutRef.current = null;
@@ -1986,18 +2482,14 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
       if (sleepTimerTimeoutRef.current) clearTimeout(sleepTimerTimeoutRef.current);
 
       const endAt = Date.now() + mins * 60 * 1000;
+      sleepEndAtRef.current = endAt;
       setSleepTimerEndAt(endAt);
       setSleepTimerRemainingSecs(mins * 60);
 
-      sleepTimerTimeoutRef.current = setTimeout(() => {
-        const audio = audioRef.current;
-        if (audio) audio.pause();
-        setIsPlaying(false);
-        pushToast("Sleep timer ended — playback paused.", "success", 4500);
-        sleepTimerTimeoutRef.current = null;
-        setSleepTimerEndAt(null);
-        setSleepTimerRemainingSecs(0);
-      }, mins * 60 * 1000);
+      // Music keeps playing (and auto-advancing) until the time is up; then it
+      // stops. Two triggers for the stop: this timeout, and a wall-clock check
+      // inside the audio events (see checkSleepTimer) as the backup.
+      sleepTimerTimeoutRef.current = setTimeout(() => checkSleepTimerRef.current?.(true), mins * 60 * 1000);
 
       setShowSleepTimerModal(false);
       setCustomSleepMinutes("");
@@ -2053,9 +2545,31 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
 
   const lastPositionStateRef = useRef(0);
 
+  // Stops playback once the sleep timer's end time has passed. Returns true if
+  // it fired. Safe to call any number of times (idempotent).
+  const checkSleepTimerRef = useRef(null);
+  checkSleepTimerRef.current = (force = false) => {
+    const endAt = sleepEndAtRef.current;
+    if (!endAt || (!force && Date.now() < endAt)) return false;
+    sleepEndAtRef.current = null;
+    if (sleepTimerTimeoutRef.current) {
+      clearTimeout(sleepTimerTimeoutRef.current);
+      sleepTimerTimeoutRef.current = null;
+    }
+    preAttachedIdRef.current = null;
+    const audio = audioRef.current;
+    if (audio) audio.pause();
+    setIsPlaying(false);
+    setSleepTimerEndAt(null);
+    setSleepTimerRemainingSecs(0);
+    pushToast("Sleep timer ended — playback paused.", "success", 4500);
+    return true;
+  };
+
   const handleTimeUpdate = () => {
     const audio = audioRef.current;
     if (!audio) return;
+    if (checkSleepTimerRef.current?.()) return;
     setCurrentTime(audio.currentTime);
 
     // ---------- Gapless background advance ----------
@@ -2086,6 +2600,8 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
     // in the foreground as a nice side effect.
     if (
       autoplay &&
+      !repeatOne &&
+      !document.hidden &&
       !earlyAdvanceFiredRef.current &&
       Number.isFinite(audio.duration) &&
       audio.duration > EARLY_ADVANCE_SECS * 2 &&
@@ -2599,10 +3115,11 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
           <input
             type="text"
             value={searchQuery}
+            readOnly
+            onClick={openSearchPage}
+            onFocus={openSearchPage}
             onChange={(e) => setSearchQuery(e.target.value)}
-            onFocus={() => setSearchFocused(true)}
-            onBlur={() => setTimeout(() => setSearchFocused(false), 150)}
-            placeholder="Search any song on YouTube&hellip;"
+            placeholder="Search any song&hellip;"
             className="search-input"
             aria-label="Search any song"
           />
@@ -2624,61 +3141,98 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
           </button>
         </div>
 
-        {showResultsDropdown && (
-          <div className="search-results custom-scrollbar">
-            {isSearching && <div className="search-status">Searching&hellip;</div>}
-            {!isSearching && searchResults.length === 0 && (
-              <div className="search-status">No results for &ldquo;{searchQuery}&rdquo;</div>
-            )}
-            {!isSearching &&
-              searchResults.map((track) => (
-                <div
-                  key={track.id}
-                  className={`search-result-item ${track.playlistLabel ? "search-result-item--in-playlist" : ""}`}
-                  onMouseDown={() => playSearchResult(track)}
-                >
-                  <div className="search-result-text">
-                    {track.playlistLabel && (
-                      <span className="search-result-playlist-badge">
-                        <PlaylistBadgeIcon /> {track.playlistLabel}
-                      </span>
-                    )}
-                    <span className="search-result-title line-clamp-2">{track.title}</span>
-                    {track.channel && <span className="search-result-channel">{track.channel}</span>}
-                  </div>
-                  <div className="search-result-actions">
-                    <button
-                      type="button"
-                      className={`add-to-playlist-btn like-btn ${isTrackLiked(track.id) ? "is-liked" : ""}`}
-                      aria-label={isTrackLiked(track.id) ? `Unlike ${track.title}` : `Like ${track.title}`}
-                      title={isTrackLiked(track.id) ? "Remove from Liked Songs" : "Add to Liked Songs"}
-                      onMouseDown={(e) => {
-                        e.stopPropagation();
-                        e.preventDefault();
-                        toggleLikeTrack(track);
-                      }}
-                    >
-                      <HeartIcon filled={isTrackLiked(track.id)} />
-                    </button>
-                    <button
-                      type="button"
-                      className="add-to-playlist-btn"
-                      aria-label={`Save ${track.title} to a playlist`}
-                      title="Save to playlist (on this device)"
-                      onMouseDown={(e) => {
-                        e.stopPropagation();
-                        e.preventDefault();
-                        openAddToPlaylistPicker(track);
-                      }}
-                    >
-                      <PlusIcon />
-                    </button>
-                  </div>
-                </div>
-              ))}
-          </div>
-        )}
       </div>
+
+      {/* ---------- Full search page ---------- */}
+      {searchPageOpen && (
+        <div className="sp-page" role="dialog" aria-modal="true" aria-label="Search">
+          <div className="sp-top">
+            <button type="button" className="sp-back" onClick={closeSearchPage} aria-label="Back">
+              <BackIcon />
+            </button>
+            <div className="sp-field">
+              <SearchIcon />
+              <input
+                ref={searchPageInputRef}
+                type="search"
+                className="sp-input"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Search any song…"
+                aria-label="Search any song"
+                autoComplete="off"
+                enterKeyHint="search"
+              />
+              {searchQuery && (
+                <button
+                  type="button"
+                  className="sp-clear"
+                  onClick={() => { setSearchQuery(""); searchPageInputRef.current?.focus(); }}
+                  aria-label="Clear search"
+                >
+                  <CloseIcon />
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div className="sp-body custom-scrollbar">
+            {!searchQuery.trim() && (
+              <div className="sp-empty">
+                <span className="sp-empty-icon" aria-hidden="true"><SearchIcon /></span>
+                <h2 className="sp-empty-title">Find any song</h2>
+                <p className="sp-empty-sub">Type a song, an artist or a few words from the lyrics.</p>
+              </div>
+            )}
+
+            {searchQuery.trim() && artistMatch && (
+              <>
+                <h2 className="sp-heading">Artist</h2>
+                <ArtistSearchCard artist={artistMatch} onOpen={openArtistPage} />
+              </>
+            )}
+
+            {searchQuery.trim() && isSearching && (
+              <div className="sp-grid" aria-hidden="true">
+                {Array.from({ length: 8 }, (_, i) => <div key={i} className="sp-card sp-skel" />)}
+              </div>
+            )}
+
+            {searchQuery.trim() && !isSearching && searchResults.length === 0 && (
+              <div className="sp-empty">
+                <h2 className="sp-empty-title">No results</h2>
+                <p className="sp-empty-sub">Nothing found for “{searchQuery}”. Try another spelling.</p>
+              </div>
+            )}
+
+            {searchQuery.trim() && !isSearching && searchResults.length > 0 && (
+              <>
+                <h2 className="sp-heading">Top result</h2>
+                {renderSearchCard(searchResults[0], true)}
+                {searchResults.length > 1 && (
+                  <>
+                    <h2 className="sp-heading">Songs</h2>
+                    <div className="sp-grid">
+                      {searchResults.slice(1).map((t) => renderSearchCard(t))}
+                    </div>
+                  </>
+                )}
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ---------- Artist page (opens from the artist card in search) ---------- */}
+      {artistPage && (
+        <ArtistPage
+          key={artistPage.name}
+          artist={artistPage}
+          onClose={closeArtistPage}
+          renderTrack={(t) => renderSearchCard(t)}
+          onPlay={playSearchResult}
+        />
+      )}
 
       {/* ---------- Bottom-docked player bar ----------
           Everything below (queue, now-playing header, and the transport
@@ -2700,7 +3254,7 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
           <div className="state-card state-card--inline">
             <span className="state-disc" aria-hidden="true" />
             <p className="state-title">Warming up the mic&hellip;</p>
-            <p className="state-sub">Fetching the playlist via yt-dlp.</p>
+            <p className="state-sub">Loading your playlist…</p>
           </div>
         )}
 
@@ -2811,6 +3365,7 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
 
             <audio
               ref={audioRef}
+              preload="auto"
               onPlay={() => setIsPlaying(true)}
               onPlaying={handleAudioPlaying}
               onPause={() => setIsPlaying(false)}
@@ -2828,7 +3383,7 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
 
             {playbackError && (
               <p className="state-sub playback-error-note" role="status">
-                {playbackError}
+                {scrubBrand(playbackError)}
               </p>
             )}
 
@@ -2879,6 +3434,15 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
                 aria-pressed={autoplay}
               >
                 <AutoplayIcon />
+              </button>
+              <button
+                className={`ctrl-btn repeat-one-btn ${repeatOne ? "is-active" : ""}`}
+                onClick={toggleRepeatOne}
+                aria-label={repeatOne ? "Repeat this song: on" : "Repeat this song: off"}
+                aria-pressed={repeatOne}
+                title="Repeat this song"
+              >
+                <RepeatOneIcon />
               </button>
               <button
                 className={`ctrl-btn sleep-timer-btn ${sleepTimerEndAt ? "is-active" : ""}`}

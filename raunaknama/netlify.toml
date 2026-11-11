@@ -31,6 +31,9 @@
 [functions."search"]
   timeout = 26
 
+[functions."artist-songs"]
+  timeout = 26
+
 [functions."playlist"]
   timeout = 26
 
