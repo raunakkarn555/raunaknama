@@ -1,5 +1,6 @@
 import https from "node:https";
 import http from "node:http";
+import { ipFamilyOf, requestUpstream } from "./googlevideo.mjs";
 
 // Native-https helper: POST a player request, pick the highest-bitrate audio
 // format, return its URL. No third-party dependencies.
@@ -184,43 +185,18 @@ export function pickBestAudioUrl(data) {
  * which used to reach the browser and show up as "Couldn't play this track").
  * A timeout/network hiccup counts as "unknown" => treated as usable.
  */
-export function probeAudioUrl(url, userAgent, timeoutMs = VALIDATE_TIMEOUT_MS) {
-  return new Promise((resolve) => {
-    let u;
-    try {
-      u = new URL(url);
-    } catch {
-      return resolve(false);
-    }
-    const lib = u.protocol === "http:" ? http : https;
-    let done = false;
-    const finish = (ok) => {
-      if (done) return;
-      done = true;
-      resolve(ok);
-    };
-    const req = lib.request(
-      {
-        hostname: u.hostname,
-        port: u.port || undefined,
-        path: `${u.pathname}${u.search}`,
-        method: "GET",
-        timeout: timeoutMs,
-        headers: { Range: "bytes=0-1", "User-Agent": userAgent, Accept: "*/*" },
-      },
-      (res) => {
-        const ok = res.statusCode >= 200 && res.statusCode < 400;
-        res.destroy(); // never download the body
-        finish(ok);
-      }
-    );
-    req.on("timeout", () => {
-      req.destroy();
-      finish(true);
-    });
-    req.on("error", () => finish(true));
-    req.end();
-  });
+export async function probeAudioUrl(url, userAgent, timeoutMs = VALIDATE_TIMEOUT_MS) {
+  // Uses the SAME request the audio proxy makes (shared requestUpstream, same
+  // IP family, same `range=` URL-param form), so "ok" here really means
+  // "the proxy can play it". It used to send a bounded `Range:` header that
+  // passed while the proxy's different request got 403 — a false positive.
+  try {
+    const res = await requestUpstream({ url, userAgent, rangeParam: "0-65535", timeoutMs });
+    res.destroy(); // never download the body
+    return res.statusCode >= 200 && res.statusCode < 400;
+  } catch {
+    return true; // timeout / network hiccup = unknown, treated as usable
+  }
 }
 
 async function askClient(videoId, c) {
@@ -240,9 +216,7 @@ async function askClient(videoId, c) {
   if (status && status !== "OK") return null; // LOGIN_REQUIRED / UNPLAYABLE for this client
   const url = pickBestAudioUrl(data);
   if (!url) return null;
-  // Drop URLs the CDN itself rejects, so the next client gets a chance
-  // inside this same request instead of the browser failing later.
-  return (await probeAudioUrl(url, c.userAgent)) ? url : null;
+  return url; // not probed server-side (see youtubeiResolver.mjs)
 }
 
 /**
@@ -302,7 +276,7 @@ export async function resolveAudio(videoId, { exclude = [] } = {}) {
     list.forEach((c, i) => {
       askClient(videoId, c)
         .then((url) => {
-          results[i] = url ? { url, client: c.name } : null;
+          results[i] = url ? { url, client: c.name, userAgent: c.userAgent } : null;
         })
         .catch(() => {
           results[i] = null;

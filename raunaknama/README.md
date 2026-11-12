@@ -331,3 +331,19 @@ then re-fetches with `?fallback=true` (Piped first), and only then skips.
 **Local test:** `npm run dev` (netlify dev, http://localhost:8888), and
 `npm run test:resolver` / `node test-resolver.mjs [videoId ...]` to check 5 songs:
 resolve time in ms + Range-request (200/206) playability. Config: `.env.example`.
+
+## Audio proxy, PO tokens and Piped (stream fixes)
+
+- `netlify/functions/audio-proxy.mjs` streams googlevideo audio to the `<audio>` element
+  with the User-Agent the extracting client used (YTJS_IOS / YTJS_MWEB / IOS URLs 403 when a
+  browser fetches them directly). `stream.mjs` returns a signed proxy URL for those clients.
+  Range requests are forwarded (seeking works). Set `AUDIO_PROXY_SECRET` in production.
+- No BotGuard/jsdom PO-token minting any more. Two separate Innertube sessions: anonymous (IOS, ~200ms, tier 1;
+  ANDROID_VR/TV/MWEB as tier 3) and cookie-authenticated (WEB only, tier 2).
+- Piped is off unless `PIPED_API_INSTANCES` is set (the old default instances were dead).
+
+### YouTube cookies in the fast resolver
+`_shared/youtubeCookies.mjs` turns `YTDLP_COOKIES_B64` (or `YTDLP_COOKIES_PATH`) into a `Cookie:` header.
+`youtubeiResolver.mjs` builds an authenticated session (TV / MWEB / WEB clients) and an anonymous one
+(IOS / ANDROID_VR) at module load. Cookies are only sent to youtube.com API endpoints — never to googlevideo.com,
+never inside proxy tokens. yt-dlp (frontend `streamClient.js`) now only runs after the fast resolver fails.

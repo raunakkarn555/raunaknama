@@ -10,6 +10,8 @@
 // Run from a normal (non-datacenter) connection for the most realistic result.
 
 import { resolveStreamFast } from "./netlify/functions/_shared/streamResolver.mjs";
+import { createProxyToken, needsProxy } from "./netlify/functions/_shared/audioProxyToken.mjs";
+import audioProxy from "./netlify/functions/audio-proxy.mjs";
 import { PIPED_INSTANCES } from "./netlify/functions/_shared/pipedResolver.mjs";
 
 const SONGS = [
@@ -39,6 +41,18 @@ async function probe(url) {
   }
 }
 
+// Calls the audio-proxy handler in-process with a browser-style Range request.
+async function probeProxy(url) {
+  const t0 = Date.now();
+  try {
+    const res = await audioProxy(new Request(url, { headers: { Range: "bytes=0-1023", "User-Agent": "Mozilla/5.0 (browser)" } }));
+    const bytes = (await res.arrayBuffer()).byteLength;
+    return { status: `${res.status} via proxy ${res.headers.get("content-range") || ""}`, ok: res.status === 200 || res.status === 206, bytes, ms: Date.now() - t0 };
+  } catch (e) {
+    return { status: "error", ok: false, bytes: 0, ms: Date.now() - t0, err: e.message };
+  }
+}
+
 console.log(`Node ${process.version} | Piped instances: ${PIPED_INSTANCES.join(", ") || "none"} | mode: ${fallback ? "fallback" : "normal"}\n`);
 
 let pass = 0;
@@ -58,7 +72,13 @@ for (const s of songs) {
     continue;
   }
   times.push(ms);
-  const main = await probe(hit.url);
+  // Same as stream.mjs: UA-bound clients are played through audio-proxy.
+  let playUrl = hit.url;
+  if (needsProxy(hit.client)) {
+    const t = createProxyToken({ url: hit.url, userAgent: hit.userAgent });
+    playUrl = `http://proxy.local/?t=${t}`;
+  }
+  const main = playUrl === hit.url ? await probe(hit.url) : await probeProxy(playUrl);
   console.log(`  resolved via ${hit.client}${hit.itag ? ` (itag ${hit.itag})` : ""} in ${ms} ms`);
   console.log(`  primary  : HTTP ${main.status} ${main.ok ? "✓ playable" : "✗"} (${main.bytes} bytes, ${main.ms} ms)`);
   let anyOk = main.ok;

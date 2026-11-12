@@ -9,10 +9,41 @@
 
 const API_BASE = import.meta.env?.VITE_API_BASE_URL || "";
 const CACHE_TTL_MS = 100 * 60 * 1000;
-const FAST_TIMEOUT_MS = 9000; // backend runs tiered clients + Piped, worst case ~7s
-// If the fast lookup hasn't answered after this long, start the slow yt-dlp
-// lookup in parallel instead of waiting for the fast one to fail first.
-const HEDGE_AFTER_MS = 4500;
+const FAST_TIMEOUT_MS = 18000; // covers a cold start (session init) + tiered clients
+// yt-dlp is slow (10-14s) and CPU heavy, so it is a LAST RESORT: it only starts
+// once the fast resolver has actually failed — never in parallel with it.
+const HEDGE_AFTER_MS = null;
+
+// --- Playback-resolution gate ------------------------------------------------
+// While the user's clicked song is still resolving (until the <audio> element
+// fires `playing`), every BACKGROUND request (next-track prefetch, hover warm,
+// playlist metadata) waits here instead of competing with it for the network
+// and the local function server.
+let resolving = 0;
+let idleWaiters = [];
+const releaseWaiters = () => {
+  const w = idleWaiters;
+  idleWaiters = [];
+  w.forEach((fn) => fn());
+};
+/** Call when a user-initiated track starts resolving. */
+export function beginPlaybackResolve() { resolving += 1; }
+/** Call on `playing`, or when the resolve failed / was cancelled. */
+export function endPlaybackResolve() {
+  resolving = Math.max(0, resolving - 1);
+  if (resolving === 0) releaseWaiters();
+}
+/** Force-clear (e.g. track switched before the old one ever played). */
+export function resetPlaybackResolve() { resolving = 0; releaseWaiters(); }
+export const isPlaybackResolving = () => resolving > 0;
+/** Resolves immediately if idle, else once playback has started. Safety cap so a stuck track can never block background work forever. */
+export function whenPlaybackIdle(maxWaitMs = 30000) {
+  if (resolving === 0) return Promise.resolve();
+  return new Promise((resolve) => {
+    const t = setTimeout(resolve, maxWaitMs);
+    idleWaiters.push(() => { clearTimeout(t); resolve(); });
+  });
+}
 
 const cache = new Map();    // id -> { data, expires }
 const failedClients = new Map(); // id -> Set of client names whose URL failed in the browser
@@ -32,7 +63,7 @@ async function fastResolve(id, { fresh = false, exclude = [] } = {}) {
     if (!data?.url) throw new Error("fast resolve returned no url");
     return data;
   } finally {
-    clearTimeout(timer);
+    if (timer) clearTimeout(timer);
   }
 }
 
@@ -57,7 +88,7 @@ function hedged(fast, slow) {
     let fastErr = null;
     let slowErr = null;
     let done = false;
-    const ok = (v) => { if (!done) { done = true; clearTimeout(timer); resolve(v); } };
+    const ok = (v) => { if (!done) { done = true; if (timer) clearTimeout(timer); resolve(v); } };
     const startSlow = () => {
       if (slowP) return;
       slowP = slow().then(ok, (e) => {
@@ -65,17 +96,26 @@ function hedged(fast, slow) {
         if (fastErr && !done) { done = true; reject(slowErr); }
       });
     };
-    const timer = setTimeout(startSlow, HEDGE_AFTER_MS);
+    const timer = HEDGE_AFTER_MS == null ? null : setTimeout(startSlow, HEDGE_AFTER_MS);
     fast().then(ok, (e) => {
       fastErr = e;
       startSlow();
-      if (slowErr && !done) { done = true; clearTimeout(timer); reject(slowErr); }
+      if (slowErr && !done) { done = true; if (timer) clearTimeout(timer); reject(slowErr); }
     });
   });
 }
 
-export function fetchStream(id, { forceRefresh = false } = {}) {
+export function fetchStream(id, { forceRefresh = false, background = false, ytdlp = false } = {}) {
   if (!id) return Promise.reject(new Error("Missing track id"));
+  // Background (prefetch / hover) work never races a user-clicked song: a
+  // cache hit is still instant, a miss waits until playback has started.
+  if (background && !forceRefresh) {
+    const hit = cache.get(id);
+    if (hit && hit.expires > Date.now()) return Promise.resolve(hit.data);
+    if (resolving > 0) {
+      return whenPlaybackIdle().then(() => fetchStream(id, { background: false }));
+    }
+  }
   // Remember which extraction client produced the URL that just failed so the
   // retry asks a different one (and never gets the same broken URL back).
   let exclude = [];
@@ -91,10 +131,12 @@ export function fetchStream(id, { forceRefresh = false } = {}) {
     const hit = cache.get(id);
     if (hit && hit.expires > Date.now()) return Promise.resolve(hit.data);
   }
-  const key = forceRefresh ? `${id}#retry` : id;
+  const key = ytdlp ? `${id}#ytdlp` : forceRefresh ? `${id}#retry` : id;
   if (inflight.has(key)) return inflight.get(key);
 
-  const p = (forceRefresh
+  // `ytdlp`: skip the fast resolver entirely (its direct + proxy urls already
+  // failed in the browser) and go straight to yt-dlp with the server's cookies.
+  const p = (ytdlp ? slowResolve(id, true) : forceRefresh
     // Retry: a different fast client, with yt-dlp (slow, most tolerant) started
     // in parallel if the fast one is slow or fails — no more waiting in series.
     ? hedged(() => fastResolve(id, { fresh: true, exclude }), () => slowResolve(id, true))
@@ -110,7 +152,7 @@ export function fetchStream(id, { forceRefresh = false } = {}) {
 
 /** Fire-and-forget pre-resolve (hover / touch / next-in-queue). */
 export function warmStream(id) {
-  if (id) fetchStream(id).catch(() => {});
+  if (id) fetchStream(id, { background: true }).catch(() => {});
 }
 
 /** Synchronous cache lookup (no network). Lets the player swap to the next

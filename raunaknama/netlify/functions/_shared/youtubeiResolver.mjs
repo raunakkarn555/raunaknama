@@ -10,7 +10,17 @@
 // "LOGIN_REQUIRED"/format-less answers for are still resolved here instead
 // of ending in "Couldn't play this track — skipping…".
 
-let ytPromise = null;
+import { getYouTubeCookieHeader } from "./youtubeCookies.mjs";
+
+let sessionsPromise = null;
+
+// Fixed (not random) session User-Agent. youtubei.js sends this header for
+// clients it has no dedicated UA for (MWEB, TV, WEB_EMBEDDED…), and the audio
+// proxy must replay the *same* UA when it fetches the googlevideo URL, so it
+// has to be deterministic. A mobile Safari UA matches the MWEB client.
+const SESSION_USER_AGENT =
+  process.env.YT_SESSION_USER_AGENT ||
+  "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 
 // Documented custom evaluator YouTube.js needs to decipher signature/n params.
 async function evalShim(data, env) {
@@ -22,41 +32,122 @@ async function evalShim(data, env) {
   return new Function(code)();
 }
 
-// One shared Innertube session per warm function instance (the player JS is
-// downloaded once and reused), so only the first cold call pays the setup.
-function getInnertube() {
-  if (!ytPromise) {
-    ytPromise = (async () => {
+// Two SEPARATE long-lived Innertube sessions per warm function instance.
+// Web cookies are never mixed into the app clients:
+//
+//   anon : NO cookies. Used for IOS / ANDROID_VR / TV / MWEB / WEB_EMBEDDED.
+//          Unauthenticated YTJS_IOS resolves itag=140 in ~200ms; attaching
+//          browser cookies to an IOS/TV request breaks it (youtubei.js would
+//          add the cookie + SAPISIDHASH to every request of a logged-in
+//          session, and the app clients do not accept web cookies).
+//   auth : carries your YouTube cookies (YTDLP_COOKIES_B64). Used EXCLUSIVELY
+//          by the WEB client, the only one where browser cookies are valid.
+//
+// No BotGuard / jsdom PO-token minting anywhere (it blocked the event loop for
+// seconds on a cold start and always failed). `anon` is created first and is
+// all the fast IOS path ever waits for; `auth` is built in the background.
+// Both share one downloaded player (signature / "n" deciphering is
+// client-independent).
+const AUTH_CLIENTS = new Set(["WEB"]);
+
+let anonPromise = null;
+let authPromise = null;
+
+function getAnon() {
+  if (!anonPromise) {
+    anonPromise = (async () => {
       const mod = await import("youtubei.js");
       const { Innertube, Platform, Log } = mod;
       try { Log.setLevel(Log.Level.NONE); } catch { /* older/newer API */ }
       try { Platform.shim.eval = evalShim; } catch { /* ignore */ }
       return Innertube.create({
+        enable_session_cache: false,
+        user_agent: SESSION_USER_AGENT,
         retrieve_player: true,
         generate_session_locally: true,
-        enable_session_cache: false,
       });
     })().catch((err) => {
-      ytPromise = null; // allow a later retry
+      anonPromise = null; // allow a later retry
       throw err;
     });
   }
-  return ytPromise;
+  return anonPromise;
 }
 
-// Kick off session creation at cold start so the first click is not slowed.
-getInnertube().catch(() => {});
+// Resolves to the cookie-authenticated session, or null when no cookies are
+// configured / the session could not be built (WEB then simply sits out).
+function getAuth() {
+  if (!authPromise) {
+    authPromise = (async () => {
+      const cookie = getYouTubeCookieHeader();
+      if (!cookie) return null;
+      try {
+        const anon = await getAnon();
+        const { Innertube } = await import("youtubei.js");
+        const base = { enable_session_cache: false, user_agent: SESSION_USER_AGENT, cookie, retrieve_player: false };
+        // Let YouTube issue visitor data for the logged-in session (more
+        // natural than a locally generated one); fall back to local on error.
+        const auth = await Innertube.create({ ...base, generate_session_locally: false })
+          .catch(() => Innertube.create({ ...base, generate_session_locally: true }));
+        auth.session.player = anon.session.player; // share the player
+        log(`authenticated WEB session ready (logged_in=${auth.session.logged_in})`);
+        return auth;
+      } catch (err) {
+        log(`authenticated session unavailable: ${String(err?.message || err).slice(0, 120)}`);
+        return null;
+      }
+    })();
+  }
+  return authPromise;
+}
+
+const sessionFor = async (clientName) => {
+  if (AUTH_CLIENTS.has(clientName)) {
+    const auth = await getAuth();
+    if (!auth) throw new Error("no cookie-authenticated session (set YTDLP_COOKIES_B64)");
+    return auth;
+  }
+  return getAnon();
+};
+
+// Warm up the anonymous session at module load (cold start).
+getAnon().catch(() => {}); // the cookie session is only built if a WEB client is ever requested
+
+// The exact User-Agent youtubei.js sent when it asked YouTube for this
+// client's streaming data. googlevideo ties some clients' URLs to it, so the
+// audio proxy replays it.
+function userAgentFor(Constants, yt, clientName) {
+  switch (clientName) {
+    case "IOS": return Constants.CLIENTS.IOS.USER_AGENT;
+    case "ANDROID": return Constants.CLIENTS.ANDROID.USER_AGENT;
+    case "ANDROID_VR": return Constants.CLIENTS.ANDROID_VR.USER_AGENT;
+    case "VISIONOS": return Constants.CLIENTS.VISIONOS.USER_AGENT;
+    default: return yt.session.user_agent || SESSION_USER_AGENT;
+  }
+}
+
+// TV URLs can be bound to either the TV player UA or the header UA youtubei.js
+// sent; the verification below tries each candidate and keeps the one the CDN
+// accepts (the proxy then replays exactly that one).
+function userAgentCandidates(Constants, yt, clientName) {
+  const primary = userAgentFor(Constants, yt, clientName);
+  if (clientName === "TV" && Constants.CLIENTS.TV?.USER_AGENT && Constants.CLIENTS.TV.USER_AGENT !== primary) {
+    return [Constants.CLIENTS.TV.USER_AGENT, primary];
+  }
+  return [primary];
+}
 
 // ---------------------------------------------------------------------------
-// Smart tiered race (instead of firing every client at once, which looks like
-// bot traffic to YouTube when it comes from a datacenter IP):
-//   Tier 1: ANDROID_VR + TV           (rarely IP-bound / PO-token gated)
-//   Tier 2: IOS + MWEB + WEB_EMBEDDED (only if tier 1 produced nothing)
-// Each tier is a Promise.any race with a strict timeout.
+// Tiered resolve (a flood of parallel clients looks like bot traffic):
+//   Tier 1: MWEB + IOS + ANDROID (anonymous session), raced — first url wins.
+//   Tier 2: TV + ANDROID_VR — only if tier 1 gave nothing.
+// WEB is not used: with cookies it still answers "SABR-only" (formats without
+// direct urls), so it only wasted ~250-650ms per track. URLs are NOT probed
+// server-side any more; the browser (or the audio proxy backup) fetches them.
 // ---------------------------------------------------------------------------
 export const TIERS = [
-  ["ANDROID_VR", "TV"],
-  ["IOS", "MWEB", "WEB_EMBEDDED"],
+  ["MWEB", "IOS", "ANDROID"],           // anonymous, raced; first url wins (~250-700ms)
+  ["TV", "ANDROID_VR"],                 // anonymous last resorts
 ];
 export const YTJS_CLIENTS = TIERS.flat();
 const TIER_TIMEOUT_MS = 3500;
@@ -88,35 +179,73 @@ function rankAudio(formats) {
   ];
 }
 
+// Picks + deciphers the best audio-only URL. Never fails silently: when no
+// URL can be produced it throws an Error that says WHY (no streaming_data,
+// formats present but without URLs / ciphers — i.e. SABR-only responses —, or
+// the exact decipher error), so the log shows the real cause per client.
 async function pickUrl(yt, info) {
-  const formats = info?.streaming_data?.adaptive_formats;
-  if (!Array.isArray(formats) || !formats.length) return null;
-  for (const f of rankAudio(formats)) {
+  const sd = info?.streaming_data;
+  const formats = sd?.adaptive_formats;
+  if (!Array.isArray(formats) || !formats.length) {
+    throw new Error(`no adaptive formats (streaming_data=${sd ? "present" : "missing"})`);
+  }
+  const audio = rankAudio(formats);
+  if (!audio.length) {
+    throw new Error(`no audio-only formats among ${formats.length} adaptive formats`);
+  }
+  const withSource = audio.filter((f) => f.url || f.signature_cipher || f.cipher);
+  if (!withSource.length) {
+    // The response carries formats but no direct URL for any of them — the
+    // client only offers SABR / server-ABR streaming (needs a PO token).
+    throw new Error(`${audio.length} audio formats but none has a direct url/cipher (SABR-only response)`);
+  }
+  let lastErr = null;
+  for (const f of withSource) {
     try {
       const url = await f.decipher(yt.session.player);
       if (typeof url === "string" && url.startsWith("http")) return { url, itag: f.itag };
-    } catch {
-      // try the next format
+      lastErr = new Error(`decipher gave a non-url for itag ${f.itag}`);
+    } catch (err) {
+      lastErr = err; // try the next format
     }
   }
-  return null;
+  throw new Error(`decipher failed: ${String(lastErr?.message || lastErr).slice(0, 100)}`);
 }
 
-/** One youtubei.js client -> { url, client, itag, ms }. Throws a clean Error on failure. */
+/** One youtubei.js client -> { url, client, itag, userAgent, ms }. Throws a clean Error on failure. */
 async function runClient(videoId, clientName) {
   const t0 = Date.now();
-  const yt = await getInnertube();
+  const yt = await sessionFor(clientName);
+  const { Constants } = await import("youtubei.js");
   const info = await yt.getBasicInfo(videoId, { client: clientName });
   const status = info?.playability_status?.status;
   if (status && status !== "OK") {
     throw new Error(`${status}${info.playability_status.reason ? ` (${info.playability_status.reason})` : ""}`);
   }
   const hit = await pickUrl(yt, info);
-  if (!hit) throw new Error("no playable audio-only format");
-  return { url: hit.url, itag: hit.itag, client: `YTJS_${clientName}`, ms: Date.now() - t0 };
+  // No server-side probe: Node's https client is not the browser that will
+  // play this url, and every extra request spends the url's first-use budget.
+  const userAgent = userAgentCandidates(Constants, yt, clientName)[0];
+  return {
+    url: hit.url,
+    itag: hit.itag,
+    client: `YTJS_${clientName}`,
+    userAgent,
+    authed: Boolean(yt.session.logged_in),
+    ms: Date.now() - t0,
+  };
 }
 
+const INIT_TIMEOUT_MS = 20000;
+
 async function raceTier(videoId, names) {
+  // Session setup (player JS download, etc.) only happens once per warm
+  // instance. It used to count against each client's 3.5s timeout, so the first
+  // requests after a cold start all "timed out" and fell through to the slow
+  // yt-dlp path. Wait for it here, THEN start the per-client timers.
+  // Only the anonymous session gates the fast path; the cookie session is
+  // awaited lazily by the WEB client alone.
+  await withTimeout(getAnon(), INIT_TIMEOUT_MS, "session init");
   const tierStart = Date.now();
   const attempts = names.map((name) =>
     withTimeout(runClient(videoId, name), TIER_TIMEOUT_MS, name).catch((err) => {
@@ -139,7 +268,7 @@ export async function resolveWithYoutubei(videoId, { exclude = [] } = {}) {
     if (!names.length) continue;
     try {
       const hit = await raceTier(videoId, names);
-      log(`${videoId} OK tier${t + 1} ${hit.client} itag=${hit.itag} in ${hit.ms}ms`);
+      log(`${videoId} OK tier${t + 1} ${hit.client} itag=${hit.itag}${hit.authed ? " (cookies)" : ""} in ${hit.ms}ms`);
       return hit;
     } catch (err) {
       log(`${videoId} tier${t + 1} (${names.join("+")}) gave nothing`);

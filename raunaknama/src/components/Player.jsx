@@ -16,9 +16,17 @@ import {
 // what makes prev/next feel instant instead of waiting on yt-dlp again.
 const CLIENT_STREAM_CACHE_TTL_MS = 100 * 60 * 1000;
 
-import { fetchStream, warmStream, peekStream } from "../streamClient";
+import {
+  fetchStream,
+  warmStream,
+  peekStream,
+  beginPlaybackResolve,
+  endPlaybackResolve,
+  whenPlaybackIdle,
+} from "../streamClient";
 import ArtistPage, { ArtistSearchCard } from "./ArtistPage";
 
+const BG_PLAYLIST_GAP_MS = 1500; // pause between sequential background playlist fetches
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
 
 // Crossfade duration between tracks — the outgoing track fades out on a
@@ -777,7 +785,7 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
   const currentTrackIdRef = useRef(null); // latest track id, readable from async callbacks
   const preAttachedIdRef = useRef(null); // id of a track whose stream was already attached synchronously inside the "ended" event (see tryInstantAdvance) — the load effect must not redo it
   const altTriedRef = useRef(new Set()); // track ids that already got the "play another upload of this song" last-resort fallback
-  const STREAM_STALL_MS = 4000; // no playable data after this long => retry via another client
+  const STREAM_STALL_MS = 3500; // no playable data after this long => retry via another client
   const MAX_FORCED_RETRIES = 3; // each retry asks a different extraction client / path before we give up on a track
   const backupStreamsRef = useRef({ id: null, list: [] }); // backup URLs (Piped-proxied) for the current track, tried before any forced re-resolve / skip
   const takeBackupStream = (id) => {
@@ -791,6 +799,25 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
     retriedTrackIdsRef.current.set(id, used + 1);
     return true;
   };
+  const playlistDataRef = useRef(new Map()); // playlistId -> { label, data } for every playlist fetched so far
+  const playlistInflightRef = useRef(new Map()); // playlistId -> Promise (dedupes background + click fetches)
+  const playlistsRef = useRef([]);
+  playlistsRef.current = playlists;
+  const playlistFailedRef = useRef(new Set()); // background fetches that failed (not retried automatically)
+  // True while a user-clicked song is resolving (gate in streamClient.js).
+  // Released on the audio `playing` event, or when the resolve gives up.
+  const resolveGateRef = useRef(false);
+  const holdResolveGate = useCallback(() => {
+    if (resolveGateRef.current) return;
+    resolveGateRef.current = true;
+    beginPlaybackResolve();
+  }, []);
+  const releaseResolveGate = useCallback(() => {
+    if (!resolveGateRef.current) return;
+    resolveGateRef.current = false;
+    endPlaybackResolve();
+  }, []);
+  useEffect(() => releaseResolveGate, [releaseResolveGate]);
   const prefetchedAutoplayRef = useRef(null); // { seedId, track } — the next "similar songs" autoplay pick, looked up + stream-resolved ahead of time
   const pendingBackgroundResumeRef = useRef(false); // true while we're waiting for the tab to come back to the foreground before retrying a failed resolve (see handleStreamFailure)
   const earlyAdvanceFiredRef = useRef(false); // guards the gapless early-advance (see handleTimeUpdate) from firing twice, and from double-firing alongside the real 'ended' event
@@ -816,48 +843,80 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
       .catch((err) => console.error("Playlists list fetch error:", err));
   }, []);
 
-  // 0a. Background-load every radio playlist's track list once we know
-  // what they are, purely so search can tell "this song is already in
-  // one of your playlists" — never blocks the UI, never touches
-  // isSearching/searchResults directly. Each /api/playlist call already
-  // has its own server-side cache (ytdlpService.mjs), so this doesn't add
-  // real extra yt-dlp load beyond what browsing those playlists would
-  // anyway; it just does it eagerly instead of waiting for the listener
-  // to open each tab manually. If a fetch fails for one playlist, the
-  // others still populate — a song from that one playlist just won't get
-  // the "in playlist" badge until the next successful load.
-  useEffect(() => {
-    if (!playlists.length) return;
-    let cancelled = false;
-
-    Promise.all(
-      playlists.map((p) =>
-        fetch(`${API_BASE}/api/playlist?playlistId=${p.id}`)
-          .then((res) => (res.ok ? res.json() : null))
-          .then((data) => ({ playlistId: p.id, playlistLabel: p.label, tracks: data?.tracks || [] }))
-          .catch(() => ({ playlistId: p.id, playlistLabel: p.label, tracks: [] }))
+  // 0a. Playlist data layer.
+  //   * ONLY the active playlist is fetched on load (effect 1 below).
+  //   * Once it is done, the other radio playlists are loaded in the
+  //     background strictly ONE AT A TIME with BG_PLAYLIST_GAP_MS between
+  //     requests (never a parallel burst), purely so search can tell
+  //     "this song is already in one of your playlists".
+  //   * Clicking a playlist that hasn't loaded yet fetches it immediately
+  //     (effect 1) — and an in-flight background fetch for the same id is
+  //     reused instead of duplicated.
+  //   * Background fetches wait while a clicked song is still resolving
+  //     (until the <audio> element fires `playing`).
+  const fetchPlaylistData = useCallback((id, label) => {
+    const hit = playlistDataRef.current.get(id);
+    if (hit) return Promise.resolve(hit.data);
+    const pending = playlistInflightRef.current.get(id);
+    if (pending) return pending;
+    const p = fetch(`${API_BASE}/api/playlist?playlistId=${id}`)
+      .then((res) =>
+        // Read the body even on failure — the function returns a JSON
+        // {error, details} payload explaining exactly why it failed.
+        res.json().then((data) => {
+          if (!res.ok) throw new Error(data?.details || data?.error || `HTTP ${res.status}`);
+          return data;
+        })
       )
-    ).then((perPlaylist) => {
-      if (cancelled) return;
-      const idIndex = new Map();
-      const flat = [];
-      perPlaylist.forEach(({ playlistId, playlistLabel, tracks }) => {
-        tracks.forEach((t) => {
-          // First playlist a song appears in wins the badge if it's in
-          // more than one — good enough, and keeps this simple.
-          if (!idIndex.has(t.id)) idIndex.set(t.id, { playlistId, playlistLabel });
-          flat.push({ id: t.id, title: t.title, playlistId, playlistLabel });
+      .then((data) => {
+        playlistDataRef.current.set(id, { label: label || id, data });
+        // Rebuild the cross-playlist search index from everything loaded so far.
+        const idIndex = new Map();
+        const flat = [];
+        playlistDataRef.current.forEach(({ label: pl, data: d }, pid) => {
+          (d?.tracks || []).forEach((t) => {
+            if (!idIndex.has(t.id)) idIndex.set(t.id, { playlistId: pid, playlistLabel: pl });
+            flat.push({ id: t.id, title: t.title, playlistId: pid, playlistLabel: pl });
+          });
         });
-      });
-      playlistTrackIndexRef.current = idIndex;
-      playlistTrackListRef.current = flat;
-      setPlaylistIndexVersion((v) => v + 1);
-    });
+        playlistTrackIndexRef.current = idIndex;
+        playlistTrackListRef.current = flat;
+        setPlaylistIndexVersion((v) => v + 1);
+        return data;
+      })
+      .finally(() => playlistInflightRef.current.delete(id));
+    playlistInflightRef.current.set(id, p);
+    return p;
+  }, []);
 
+  useEffect(() => {
+    // `loading` is true while the active playlist is still being fetched.
+    if (!playlists.length || loading) return;
+    let cancelled = false;
+    let timer = null;
+
+    const step = async () => {
+      if (cancelled) return;
+      const next = playlists.find(
+        (p) => !playlistDataRef.current.has(p.id) && !playlistFailedRef.current.has(p.id)
+      );
+      if (!next) return; // everything loaded
+      await whenPlaybackIdle(); // never compete with a song that is resolving
+      if (cancelled) return;
+      try {
+        await fetchPlaylistData(next.id, next.label);
+      } catch {
+        playlistFailedRef.current.add(next.id); // don't hammer a failing playlist
+      }
+      if (!cancelled) timer = setTimeout(step, BG_PLAYLIST_GAP_MS);
+    };
+
+    timer = setTimeout(step, BG_PLAYLIST_GAP_MS);
     return () => {
       cancelled = true;
+      if (timer) clearTimeout(timer);
     };
-  }, [playlists]);
+  }, [playlists, loading, activePlaylistId, fetchPlaylistData]);
 
   // 0b. Safety net: never let the "Warming up the mic…" state hang forever.
   // If nothing has resolved after 20s (slow cold start, blocked network,
@@ -917,23 +976,13 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
     setLoading(true);
     setError(null);
 
-    fetch(`${API_BASE}/api/playlist?playlistId=${activePlaylistId}`)
-      .then((res) => {
-        // Read the body even on failure — the Netlify function returns a
-        // JSON {error, details} payload explaining exactly why it failed
-        // (e.g. "yt-dlp binary not found" or "YouTube blocked server IP").
-        // Previously this was thrown away, so the console only ever showed
-        // a generic "Failed to load playlist from server" with no way to
-        // diagnose the real cause. Now we surface it.
-        return res.json().then((data) => {
-          if (!res.ok) {
-            const reason = data?.details || data?.error || `HTTP ${res.status}`;
-            throw new Error(reason);
-          }
-          return data;
-        });
-      })
+    let cancelled = false;
+    const activeLabel = playlistsRef.current.find((p) => p.id === activePlaylistId)?.label;
+    // Fetched right away (the user opened it) — or reused from the
+    // background loader / cache if it already landed.
+    fetchPlaylistData(activePlaylistId, activeLabel)
       .then((data) => {
+        if (cancelled) return;
         if (data.tracks && data.tracks.length > 0) {
           setPlaylist(data);
           setCurrentIndex(
@@ -950,12 +999,16 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
         setLoading(false);
       })
       .catch((err) => {
+        if (cancelled) return;
         console.error("Playlist Fetch Error:", err);
         setError(`Could not load playlist: ${err.message}`);
         setLoading(false);
         pushToast(`Could not load playlist: ${err.message}`, "error");
       });
-  }, [activePlaylistId, customPlaylists, pushToast]);
+    return () => {
+      cancelled = true;
+    };
+  }, [activePlaylistId, customPlaylists, pushToast, fetchPlaylistData]);
 
   // Merges live YouTube search results with the cross-playlist index built
   // above, so a song already sitting in one of the 7 radio playlists shows
@@ -1174,20 +1227,28 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
     // A cached URL is what lets the next song start instantly even with the
     // screen locked, so make sure it really lands: retry a failed prefetch
     // once, and also warm the track after next.
+    // Background prefetch: deferred one tick so the track-load effect below
+    // takes the resolve gate first, then held until the current song is
+    // actually playing (see streamClient.js).
     let retryTimer = null;
-    resolveStream(nextTrack.id).catch(() => {
-      retryTimer = setTimeout(() => resolveStream(nextTrack.id, { forceRefresh: true }).catch(() => {}), 4000);
-    });
+    let afterTimer = null;
+    const startTimer = setTimeout(() => {
+      resolveStream(nextTrack.id, { background: true }).catch(() => {
+        retryTimer = setTimeout(() => resolveStream(nextTrack.id, { forceRefresh: true }).catch(() => {}), 4000);
+      });
+    }, 0);
     const order = shuffle && shuffleOrder.length ? shuffleOrder : null;
     const afterIdx = order
       ? order[(order.indexOf(currentIndex) + 2) % order.length]
       : (currentIndex + 2) % playlist.tracks.length;
     const afterTrack = playlist.tracks[afterIdx];
     if (afterTrack && afterTrack.id !== nextTrack.id && afterTrack.id !== currentTrack?.id) {
-      setTimeout(() => resolveStream(afterTrack.id).catch(() => {}), 1500);
+      afterTimer = setTimeout(() => resolveStream(afterTrack.id, { background: true }).catch(() => {}), 1500);
     }
     return () => {
+      clearTimeout(startTimer);
       if (retryTimer) clearTimeout(retryTimer);
+      if (afterTimer) clearTimeout(afterTimer);
     };
   }, [playlist, currentIndex, shuffle, shuffleOrder, activeSource, resolveStream]);
 
@@ -1271,6 +1332,9 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
 
     const wantsPlay = isPlaying;
 
+    // Pause all background fetches until this song is actually playing.
+    holdResolveGate();
+
     resolveStream(currentTrack.id)
       .then((data) => {
         if (cancelled || token !== loadTokenRef.current) return;
@@ -1298,12 +1362,14 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
             .catch((err2) => {
               if (cancelled || token !== loadTokenRef.current) return;
               console.warn("Stream re-resolve also failed:", err2.message);
+              releaseResolveGate();
               setIsTrackLoading(false);
               handleStreamFailure(err2.details || err2.message);
             });
           return;
         }
 
+        releaseResolveGate();
         setIsTrackLoading(false);
         handleStreamFailure(err.details || err.message);
       });
@@ -1899,6 +1965,7 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
   };
 
   const skipFailedTrack = (message) => {
+    releaseResolveGate();
     consecutiveFailures.current += 1;
     if (consecutiveFailures.current > 5) {
       const stopMsg =
@@ -1944,7 +2011,9 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
     if (trackId && takeForcedRetry(trackId)) {
       const token = ++loadTokenRef.current;
       setIsTrackLoading(true);
-      resolveStream(trackId, { forceRefresh: true })
+      // Direct url and proxy backup both failed: go straight to yt-dlp
+      // (cookies on the server) and hand its url to <audio>.
+      resolveStream(trackId, { forceRefresh: true, ytdlp: true })
         .then((data) => {
           if (token !== loadTokenRef.current) return;
           setIsTrackLoading(false);
@@ -1979,6 +2048,7 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
   handleAudioErrorRef.current = handleAudioError;
 
   const handleAudioPlaying = () => {
+    releaseResolveGate(); // background prefetch / playlist loading may resume now
     consecutiveFailures.current = 0;
     if (currentTrack?.id) {
       retriedTrackIdsRef.current.delete(currentTrack.id);
@@ -2102,7 +2172,7 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
       .then((next) => {
         if (cancelled || !next) return;
         prefetchedAutoplayRef.current = { seedId: seed.id, track: next };
-        resolveStream(next.id).catch(() => {});
+        resolveStream(next.id, { background: true }).catch(() => {});
       })
       .catch(() => {});
 

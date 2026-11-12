@@ -2,20 +2,18 @@
 // the instance's own proxy host), so they are not bound to this server's IP
 // and play from the browser regardless of where the function runs.
 //
-// Public Piped instances come and go — override the list without redeploying
-// code via the PIPED_API_INSTANCES env var (comma-separated base URLs).
-
-const DEFAULT_INSTANCES = [
-  "https://pipedapi.kavin.rocks",
-  "https://pipedapi.adminforge.de",
-  "https://piped-api.private.coffee",
-];
+// Public Piped instances come and go, and the former built-in defaults
+// (pipedapi.kavin.rocks, pipedapi.adminforge.de, piped-api.private.coffee)
+// were failing on every request (502/525/403/fetch failed), only adding
+// 300-1000ms of dead wait. There is therefore NO default list any more:
+// Piped is skipped entirely unless PIPED_API_INSTANCES is explicitly set
+// (comma-separated base URLs of instances you have verified work), e.g.
+//   PIPED_API_INSTANCES=https://my-piped-api.example.com,https://other.example.org
 
 export const PIPED_INSTANCES = (process.env.PIPED_API_INSTANCES || "")
   .split(",")
   .map((s) => s.trim().replace(/\/+$/, ""))
-  .filter(Boolean)
-  .concat(process.env.PIPED_API_INSTANCES ? [] : DEFAULT_INSTANCES);
+  .filter(Boolean);
 
 const PIPED_TIMEOUT_MS = 3500;
 const LOG = process.env.STREAM_LOG !== "0";

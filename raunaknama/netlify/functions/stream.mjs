@@ -1,4 +1,6 @@
 import { resolveStreamFast } from "./_shared/streamResolver.mjs";
+import { createProxyToken, needsProxy } from "./_shared/audioProxyToken.mjs";
+import { isGooglevideo } from "./_shared/googlevideo.mjs";
 
 // GET /api/stream?token=<mediaId>
 //   -> 302/307 redirect to the highest-bitrate audio URL. Node never touches
@@ -58,6 +60,39 @@ function resolveUrl(token, { fresh = false, exclude = [], fallback = false } = {
   return p;
 }
 
+// YTJS_IOS / YTJS_MWEB (and legacy IOS) googlevideo URLs are bound to the
+// client User-Agent that extracted them: a browser <audio> element requesting
+// them directly gets 403. For those we hand the player a signed URL of our own
+// streaming proxy (audio-proxy.mjs), which replays the right User-Agent and
+// forwards Range requests. Other clients' URLs are returned untouched.
+function originOf(event) {
+  try {
+    if (event.rawUrl) return new URL(event.rawUrl).origin;
+  } catch { /* fall through */ }
+  const h = event.headers || {};
+  const host = h["x-forwarded-host"] || h.host;
+  if (!host) return "";
+  const proto = h["x-forwarded-proto"] || (/^(localhost|127\.|\[::1\])/.test(host) ? "http" : "https");
+  return `${proto}://${host}`;
+}
+
+// Direct googlevideo url first (the browser plays it as-is); the signed
+// audio-proxy url rides along as the first backup. AUDIO_PROXY_CLIENTS can
+// still force the proxy to be primary for specific clients.
+function playable(hit, origin) {
+  const proxyUrl = () => {
+    const token = createProxyToken({ url: hit.url, userAgent: hit.userAgent });
+    return `${origin}/.netlify/functions/audio-proxy?t=${token}`;
+  };
+  if (needsProxy(hit.client)) return { url: proxyUrl(), proxied: true, proxyBackup: null };
+  const canProxy = origin && hit.userAgent !== undefined && isGooglevideo(hit.url);
+  return {
+    url: hit.url,
+    proxied: false,
+    proxyBackup: canProxy ? { url: proxyUrl(), client: `${hit.client}+PROXY` } : null,
+  };
+}
+
 const json = (statusCode, body) => ({
   statusCode,
   headers: { "Content-Type": "application/json", ...CORS },
@@ -83,12 +118,14 @@ export const handler = async (event) => {
       exclude: exclude ? String(exclude).split(",").filter(Boolean) : [],
     });
     if (!hit) return json(404, { error: "No audio format available for this track" });
-    const { url, client, fallbacks = [] } = hit;
+    const { client, fallbacks = [] } = hit;
+    const { url, proxied, proxyBackup } = playable(hit, originOf(event));
+    const backups = [...(proxyBackup ? [proxyBackup] : []), ...fallbacks];
 
     // ?json=1 -> same fast resolver, but hands the URL back as JSON so the
     // player can set audio.src itself (and cache it) instead of following a redirect.
     if (wantJson) {
-      const res = json(200, { url, type: "direct", source: "fast", client, fallbacks: fallbacks.map((f) => ({ url: f.url, type: "direct", client: f.client })) });
+      const res = json(200, { url, type: "direct", source: "fast", client, proxied, fallbacks: backups.map((f) => ({ url: f.url, type: "direct", client: f.client })) });
       // A forced/fresh lookup must never be served from a browser/CDN cache.
       res.headers["Cache-Control"] = fresh === "1" || fallback === "true" ? "no-store" : "private, max-age=300";
       return res;

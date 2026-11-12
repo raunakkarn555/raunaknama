@@ -28,6 +28,10 @@
 [functions."stream"]
   timeout = 26
 
+# Streams audio from googlevideo to the <audio> element (Range-aware).
+[functions."audio-proxy"]
+  timeout = 26
+
 [functions."search"]
   timeout = 26
 
