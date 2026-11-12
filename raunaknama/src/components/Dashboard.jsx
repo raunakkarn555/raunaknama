@@ -473,7 +473,18 @@ function ModeSwitch({ mode, onChange }) {
   );
 }
 
-function RecoCard({ item, isCurrent, playing, onSelect, onWarm, onCancelWarm }) {
+const RecoHeartIcon = ({ filled }) => (
+  <svg viewBox="0 0 24 24" width="14" height="14" fill={filled ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1-1.1a5.5 5.5 0 0 0-7.8 7.8l1 1.1L12 21l7.8-7.5 1-1.1a5.5 5.5 0 0 0 0-7.8z" />
+  </svg>
+);
+const RecoPlusIcon = () => (
+  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M12 5v14M5 12h14" />
+  </svg>
+);
+
+function RecoCard({ item, isCurrent, playing, liked = false, onSelect, onWarm, onCancelWarm, onToggleLike, onAddToPlaylist }) {
   // Whole card is the click target.
   return (
     <li
@@ -498,12 +509,37 @@ function RecoCard({ item, isCurrent, playing, onSelect, onWarm, onCancelWarm }) 
         <span className="rc-title" title={item.title}>{item.title}</span>
         <span className="rc-artist" title={item.subtitle}>{item.subtitle}</span>
       </button>
+      {(onToggleLike || onAddToPlaylist) && (
+        <div className="rc-actions">
+          {onToggleLike && (
+            <button
+              type="button"
+              className={`rc-act ${liked ? "is-liked" : ""}`}
+              aria-label={liked ? `Unlike ${item.title}` : `Like ${item.title}`}
+              aria-pressed={liked}
+              onClick={() => onToggleLike(item)}
+            >
+              <RecoHeartIcon filled={liked} />
+            </button>
+          )}
+          {onAddToPlaylist && (
+            <button
+              type="button"
+              className="rc-act"
+              aria-label={`Save ${item.title} to a playlist`}
+              onClick={() => onAddToPlaylist(item)}
+            >
+              <RecoPlusIcon />
+            </button>
+          )}
+        </div>
+      )}
     </li>
   );
 }
 
 /** Host-agnostic grid: the host decides how a picked track is played. */
-export function RecommendedGrid({ currentId, playing = false, onSelect, onWarm, onCancelWarm }) {
+export function RecommendedGrid({ currentId, playing = false, likedIds, onSelect, onWarm, onCancelWarm, onToggleLike, onAddToPlaylist }) {
   const { sections, status, loadMore, retry } = usePipedFeed();
   const enabled = status === "idle";
   // Re-subscribes (and re-checks position) each time a shelf lands, so the
@@ -541,9 +577,12 @@ export function RecommendedGrid({ currentId, playing = false, onSelect, onWarm, 
                 item={it}
                 isCurrent={currentId === it.id}
                 playing={currentId === it.id && playing}
+                liked={Boolean(likedIds?.has(it.id))}
                 onSelect={onSelect}
                 onWarm={onWarm}
                 onCancelWarm={onCancelWarm}
+                onToggleLike={onToggleLike}
+                onAddToPlaylist={onAddToPlaylist}
               />
             ))}
           </ul>

@@ -6,7 +6,7 @@ import {
   authArgs,
   spawnYtDlp,
   cookieAwareErrorDetails,
-  CORS_HEADERS,
+  CORS_HEADERS, CDN_CACHE,
 } from "./_shared/ytdlpService.mjs";
 
 async function fetchPlaylist(selected) {
@@ -99,7 +99,9 @@ export const handler = async (event) => {
     const payload = await fetchPlaylist(selected);
     return {
       statusCode: 200,
-      headers: { "Content-Type": "application/json", ...CORS_HEADERS },
+      // Netlify's CDN keeps this for 30 min (keyed by URL incl. ?playlistId=),
+      // browsers for 5; stale copies may be served while it refreshes.
+      headers: { "Content-Type": "application/json", "Cache-Control": CDN_CACHE, ...CORS_HEADERS },
       body: JSON.stringify(payload),
     };
   } catch (err) {

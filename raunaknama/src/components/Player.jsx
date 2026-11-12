@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef, useCallback } from "react";
+import React, { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import Hls from "hls.js";
 import "./Player.css";
 import {
@@ -26,6 +26,7 @@ import {
 } from "../streamClient";
 import ArtistPage, { ArtistSearchCard } from "./ArtistPage";
 
+const PREFETCH_AFTER_PLAY_MS = 2000; // next-track pre-resolve starts this long after the current song begins playing
 const BG_PLAYLIST_GAP_MS = 1500; // pause between sequential background playlist fetches
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
 
@@ -612,7 +613,33 @@ const savePlaybackState = (state) => {
   }
 };
 
-export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroundImageUrl, playRequest }) {
+// ---------- Artist card fallback ----------
+// The artist card normally comes from a Wikipedia lookup (/api/artist). If that
+// returns nothing (Wikipedia unreachable from the host, no article, or the
+// phone keyboard changed the spelling), build a minimal card from the search
+// results themselves: when the query is a name and several top results come
+// from a channel with that name, it's an artist.
+const ARTIST_FILLER = new Set(["song", "songs", "gana", "gaane", "hits", "hit", "best", "top", "new", "latest", "mp3", "all", "singer", "music", "official", "audio"]);
+const wordTokens = (s) => String(s || "").toLowerCase().match(/[\p{L}\p{N}]+/gu) || [];
+const cleanChannelName = (c) =>
+  String(c || "").replace(/\s*-\s*topic$/i, "").replace(/\s*vevo$/i, "").replace(/\s*official( channel)?$/i, "").trim();
+function deriveArtistFromResults(query, results) {
+  const q = wordTokens(query).filter((t) => !ARTIST_FILLER.has(t));
+  if (!q.length || q.length > 4 || q.join("").length < 3 || !results?.length) return null;
+  const counts = new Map();
+  results.slice(0, 8).forEach((r) => {
+    const name = cleanChannelName(r.channel);
+    const t = wordTokens(name);
+    if (!t.length || t.length > q.length + 2) return;
+    const ok = q.every((w, i) => t.includes(w) || (i === q.length - 1 && w.length >= 3 && t.some((x) => x.startsWith(w))));
+    if (ok) counts.set(name, (counts.get(name) || 0) + 1);
+  });
+  let best = null;
+  counts.forEach((n, name) => { if (n >= 2 && (!best || n > best.n)) best = { name, n }; });
+  return best ? { name: best.name, image: null, about: "", description: "Songs from YouTube", derived: true } : null;
+}
+
+export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroundImageUrl, playRequest, onPlayerApi, onLikedChange }) {
   // Read once, synchronously, before any state is seeded below — several
   // pieces of initial state (active playlist, track index, search pick,
   // volume) fall back to whatever was saved here so playback can resume.
@@ -1228,29 +1255,50 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
     // screen locked, so make sure it really lands: retry a failed prefetch
     // once, and also warm the track after next.
     // Background prefetch: deferred one tick so the track-load effect below
-    // takes the resolve gate first, then held until the current song is
-    // actually playing (see streamClient.js).
+    // takes the resolve gate first; then we wait until the current song is
+    // actually playing and give it PREFETCH_AFTER_PLAY_MS of clear network
+    // before resolving the next one (and, shortly after, the one after).
+    let cancelled = false;
     let retryTimer = null;
+    let nextTimer = null;
     let afterTimer = null;
-    const startTimer = setTimeout(() => {
-      resolveStream(nextTrack.id, { background: true }).catch(() => {
-        retryTimer = setTimeout(() => resolveStream(nextTrack.id, { forceRefresh: true }).catch(() => {}), 4000);
-      });
-    }, 0);
     const order = shuffle && shuffleOrder.length ? shuffleOrder : null;
     const afterIdx = order
       ? order[(order.indexOf(currentIndex) + 2) % order.length]
       : (currentIndex + 2) % playlist.tracks.length;
     const afterTrack = playlist.tracks[afterIdx];
-    if (afterTrack && afterTrack.id !== nextTrack.id && afterTrack.id !== currentTrack?.id) {
-      afterTimer = setTimeout(() => resolveStream(afterTrack.id, { background: true }).catch(() => {}), 1500);
-    }
+    const startTimer = setTimeout(async () => {
+      await whenPlaybackIdle();
+      if (cancelled) return;
+      nextTimer = setTimeout(() => {
+        resolveStream(nextTrack.id, { background: true }).catch(() => {
+          retryTimer = setTimeout(() => resolveStream(nextTrack.id, { forceRefresh: true }).catch(() => {}), 4000);
+        });
+        if (afterTrack && afterTrack.id !== nextTrack.id && afterTrack.id !== currentTrack?.id) {
+          afterTimer = setTimeout(() => resolveStream(afterTrack.id, { background: true }).catch(() => {}), 1500);
+        }
+      }, PREFETCH_AFTER_PLAY_MS);
+    }, 0);
     return () => {
+      cancelled = true;
       clearTimeout(startTimer);
+      if (nextTimer) clearTimeout(nextTimer);
       if (retryTimer) clearTimeout(retryTimer);
       if (afterTimer) clearTimeout(afterTimer);
     };
   }, [playlist, currentIndex, shuffle, shuffleOrder, activeSource, resolveStream]);
+
+  // Pre-resolve the first two tracks of the active playlist so the first
+  // click is a cache hit (search results are warmed where they load).
+  // Background-priority: held while a clicked song is still resolving, and the
+  // streamClient cache (2 h) makes repeats free.
+  const listHeadKey = !loading && playlist?.tracks?.length
+    ? playlist.tracks.slice(0, 2).map((t) => t.id).join(",")
+    : "";
+  useEffect(() => {
+    if (!listHeadKey) return;
+    listHeadKey.split(",").forEach((id) => warmStream(id));
+  }, [listHeadKey]);
 
   // 3. Managed Safe Audio Loading without Race Conditions.
   // Resolves the current track to a real URL + format type, then either:
@@ -2364,6 +2412,8 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
   // Artist card (search) + artist page. `artistMatch` is the artist the current
   // query refers to (null when the query is not an artist name).
   const [artistMatch, setArtistMatch] = useState(null);
+  const derivedArtist = useMemo(() => deriveArtistFromResults(searchQuery, searchResults), [searchQuery, searchResults]);
+  const shownArtist = artistMatch || derivedArtist;
   const [artistPage, setArtistPage] = useState(null);
 
   const openArtistPage = (artist) => {
@@ -2798,6 +2848,16 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
     setAddToPlaylistTrack(track);
   };
 
+  // Lets the host shell (App.jsx) drive like / add-to-playlist from the
+  // "Recommended" cards with the very same logic the search cards use.
+  useEffect(() => {
+    onPlayerApi?.({ toggleLike: toggleLikeTrack, addToPlaylist: openAddToPlaylistPicker });
+  });
+  useEffect(() => {
+    onLikedChange?.(likedTracks.map((t) => t.id));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [likedTracks]);
+
   const closeAddToPlaylistPicker = () => {
     setAddToPlaylistTrack(null);
     setAddToPlaylistFeedback("");
@@ -3231,6 +3291,9 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
                 placeholder="Search any song…"
                 aria-label="Search any song"
                 autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="off"
+                spellCheck={false}
                 enterKeyHint="search"
               />
               {searchQuery && (
@@ -3255,10 +3318,10 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
               </div>
             )}
 
-            {searchQuery.trim() && artistMatch && (
+            {searchQuery.trim() && shownArtist && (
               <>
                 <h2 className="sp-heading">Artist</h2>
-                <ArtistSearchCard artist={artistMatch} onOpen={openArtistPage} />
+                <ArtistSearchCard artist={shownArtist} onOpen={openArtistPage} />
               </>
             )}
 

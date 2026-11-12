@@ -5,6 +5,10 @@ import path from "path";
 import https from "https";
 import zlib from "zlib";
 
+// AWS Lambda (Netlify Functions) is read-only except /tmp, so everything
+// yt-dlp needs to WRITE — the cookie jar copy and its cache — lives there.
+const TMP_DIR = fs.existsSync("/tmp") ? "/tmp" : os.tmpdir();
+
 // NOTE: this file deliberately does NOT import anything from the
 // `ytdlp-nodejs` package. That package resolves its own binary path using
 // `import.meta.url` at module-load time, which breaks the instant Netlify's
@@ -55,7 +59,7 @@ export const PLAYLISTS = [
 function resolveCookiesPath() {
   if (process.env.YTDLP_COOKIES_PATH && fs.existsSync(process.env.YTDLP_COOKIES_PATH)) {
     try {
-      const tmpPath = path.join(os.tmpdir(), "yt-cookies.txt");
+      const tmpPath = path.join(TMP_DIR, "yt-cookies.txt");
       fs.copyFileSync(process.env.YTDLP_COOKIES_PATH, tmpPath);
       console.log(`Using cookies from YTDLP_COOKIES_PATH -> ${tmpPath}`);
       return tmpPath;
@@ -83,8 +87,8 @@ function resolveCookiesPath() {
       // works too — no silent breakage for anyone who sets it the old way.
       const isGzip = raw.length > 2 && raw[0] === 0x1f && raw[1] === 0x8b;
       const decoded = (isGzip ? zlib.gunzipSync(raw) : raw).toString("utf8");
-      const tmpPath = path.join(os.tmpdir(), "yt-cookies.txt");
-      fs.writeFileSync(tmpPath, decoded, "utf8");
+      const tmpPath = path.join(TMP_DIR, "yt-cookies.txt");
+      fs.writeFileSync(tmpPath, decoded, { encoding: "utf8", mode: 0o600 });
       console.log(`Loaded YouTube cookies from YTDLP_COOKIES_B64 (${isGzip ? "gzip" : "plain"})`);
       return tmpPath;
     } catch (err) {
@@ -148,6 +152,8 @@ export function authArgs() {
     // has real room (45s, not the old 9s) — a slow-but-working connection
     // now gets multiple real attempts instead of failing after one.
     "--socket-timeout", "10",
+    // yt-dlp's default cache dir is under $HOME, which is read-only on Lambda.
+    "--cache-dir", path.join(TMP_DIR, "yt-dlp-cache"),
     "--extractor-retries", "2",
     "--retries", "3",
   ];
@@ -505,6 +511,11 @@ export async function spawnYtDlp(args) {
 // Shared by every function (search, lyrics, stream, playlists, ...). HEAD and
 // Range are included so <audio> preflights/seeks and the new Recommended-mode
 // frontend work cross-origin; Expose-Headers lets the player read Content-Range.
+// Edge-cache policy for read-only, non-personalised JSON (playlists, search):
+// browsers 5 min, Netlify's CDN 30 min (+ stale-while-revalidate). Never use
+// this on /stream or /audio-proxy: those urls are IP-bound and expire.
+export const CDN_CACHE = "public, max-age=300, s-maxage=1800, stale-while-revalidate=3600";
+
 export const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",

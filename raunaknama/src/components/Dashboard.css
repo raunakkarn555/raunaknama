@@ -309,3 +309,20 @@
   /* no hover on touch: keep cards still while swiping */
   .rc:hover, .rc:focus-within { transform: none; box-shadow: none; }
 }
+
+/* ---------- Recommended cards: like + add-to-playlist (same look as search cards) ---------- */
+.rc { position: relative; }
+.rc-actions {
+  position: absolute; top: 22px; right: 22px; z-index: 2; display: flex; gap: 6px;
+  opacity: 0; transition: opacity 0.2s ease;
+}
+.rc:hover .rc-actions, .rc:focus-within .rc-actions { opacity: 1; }
+.rc-act {
+  width: 32px; height: 32px; display: grid; place-items: center; border-radius: 50%; cursor: pointer; padding: 0;
+  border: 1px solid rgba(244, 232, 216, 0.22); background: rgba(21, 10, 13, 0.72); color: var(--cream, #f4e8d8);
+  backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+}
+.rc-act:hover { border-color: var(--reco-gold, #e2ab3f); color: var(--reco-gold, #e2ab3f); }
+.rc-act.is-liked { color: var(--reco-red, #b8333a); }
+/* Touch screens have no hover: keep the buttons visible. */
+@media (hover: none) { .rc-actions { opacity: 1; } }

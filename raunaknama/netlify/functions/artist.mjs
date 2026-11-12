@@ -60,14 +60,28 @@ async function wikiLookup(q) {
     exsentences: "6",
     exlimit: "max",
   });
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 5000);
+  // Wikimedia asks for a descriptive User-Agent with contact info and is quick
+  // to 403/429 anonymous cloud (datacenter) traffic, so identify ourselves
+  // properly and retry once on a throttle / server error.
+  const UA = "Raunaknama/1.0 (https://raunaknama.netlify.app; personal radio site) node-fetch";
+  const headers = { "User-Agent": UA, "Api-User-Agent": UA, Accept: "application/json" };
+  let res = null;
+  let lastErr = null;
+  for (let attempt = 0; attempt < 2 && !(res && res.ok); attempt++) {
+    if (attempt) await new Promise((r) => setTimeout(r, 400));
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 4500);
+    try {
+      res = await fetch(`https://en.wikipedia.org/w/api.php?${params}`, { signal: ctrl.signal, headers });
+      if (!res.ok) lastErr = new Error(`Wikipedia HTTP ${res.status}`);
+    } catch (err) {
+      lastErr = err;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  if (!res || !res.ok) throw lastErr || new Error("Wikipedia lookup failed");
   try {
-    const res = await fetch(`https://en.wikipedia.org/w/api.php?${params}`, {
-      signal: ctrl.signal,
-      headers: { "User-Agent": "Raunaknama/1.0 (personal radio site)", Accept: "application/json" },
-    });
-    if (!res.ok) throw new Error(`Wikipedia HTTP ${res.status}`);
     const data = await res.json();
     const pages = Object.values(data?.query?.pages || {}).sort((a, b) => (a.index || 99) - (b.index || 99));
     for (const p of pages) {
@@ -85,7 +99,7 @@ async function wikiLookup(q) {
     }
     return null;
   } finally {
-    clearTimeout(timer);
+    /* nothing to clean up */
   }
 }
 

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Player from './components/Player';
 import { RecommendedGrid } from './components/Dashboard';
 import { warmStream } from './streamClient';
@@ -285,6 +285,14 @@ function NavClock() {
 function App() {
   const [mode, setMode] = useState('default'); // 'default' | 'recommended'
   const [playRequest, setPlayRequest] = useState(null);
+  // Like / add-to-playlist for the Recommended cards are handled by the Player
+  // (single source of truth for liked songs + the playlist picker).
+  const playerApiRef = useRef(null);
+  const [likedIdList, setLikedIdList] = useState([]);
+  const likedIds = useMemo(() => new Set(likedIdList), [likedIdList]);
+  const recoToTrack = (it) => ({ id: it.id, title: it.title, channel: it.channel || it.subtitle || null, duration: it.durationSeconds });
+  const toggleRecoLike = useCallback((it) => playerApiRef.current?.toggleLike(recoToTrack(it)), []);
+  const addRecoToPlaylist = useCallback((it) => playerApiRef.current?.addToPlaylist(recoToTrack(it)), []);
   const [currentTrackId, setCurrentTrackId] = useState(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [bgIndex, setBgIndex] = useState(() => {
@@ -521,6 +529,8 @@ function App() {
         <Player
           onTrackChange={handleTrackChange}
           playRequest={playRequest}
+          onPlayerApi={(api) => { playerApiRef.current = api; }}
+          onLikedChange={setLikedIdList}
           menuOpen={menuOpen}
           onCloseMenu={closeMenu}
           backgroundImageUrl={isMobile ? `/bg/mobile/${bgIndex}.jpg` : `/bg/${bgIndex}.jpg`}
@@ -529,6 +539,9 @@ function App() {
           <div className="reco-embed dash">
             <RecommendedGrid
               currentId={currentTrackId}
+              likedIds={likedIds}
+              onToggleLike={toggleRecoLike}
+              onAddToPlaylist={addRecoToPlaylist}
               onSelect={playRecommended}
               onWarm={(t) => warmStream(t.id)}
             />

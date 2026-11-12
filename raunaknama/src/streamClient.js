@@ -8,7 +8,7 @@
 // shared, so hovering a card (warmStream) and then clicking it costs one call.
 
 const API_BASE = import.meta.env?.VITE_API_BASE_URL || "";
-const CACHE_TTL_MS = 100 * 60 * 1000;
+const CACHE_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours (googlevideo urls stay valid ~6 h)
 const FAST_TIMEOUT_MS = 18000; // covers a cold start (session init) + tiered clients
 // yt-dlp is slow (10-14s) and CPU heavy, so it is a LAST RESORT: it only starts
 // once the fast resolver has actually failed — never in parallel with it.

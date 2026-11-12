@@ -5,7 +5,7 @@ import {
   authArgs,
   spawnYtDlp,
   cookieAwareErrorDetails,
-  CORS_HEADERS,
+  CORS_HEADERS, CDN_CACHE,
 } from "./_shared/ytdlpService.mjs";
 
 export const handler = async (event) => {
@@ -28,7 +28,7 @@ export const handler = async (event) => {
   if (cached) {
     return {
       statusCode: 200,
-      headers: { "Content-Type": "application/json", ...CORS_HEADERS },
+      headers: { "Content-Type": "application/json", "Cache-Control": CDN_CACHE, ...CORS_HEADERS },
       body: JSON.stringify(cached),
     };
   }
@@ -77,7 +77,7 @@ export const handler = async (event) => {
 
     return {
       statusCode: 200,
-      headers: { "Content-Type": "application/json", ...CORS_HEADERS },
+      headers: { "Content-Type": "application/json", "Cache-Control": CDN_CACHE, ...CORS_HEADERS },
       body: JSON.stringify(payload),
     };
   } catch (err) {
