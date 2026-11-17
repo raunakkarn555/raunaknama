@@ -59,7 +59,10 @@ export const nativeAddMediaButtonListeners = ({ onPlay, onPause, onNext, onPrevi
     onSeek && plugin.addListener("seek", (data) => onSeek(data?.position)),
   ].filter(Boolean);
 
+  // addListener() returns a Promise<PluginListenerHandle>: it must be awaited before
+  // remove() exists. (Calling h.remove on the bare Promise silently leaked listeners, so one
+  // notification "Next" tap fired many times.)
   return () => {
-    handles.forEach((h) => h?.remove?.());
+    handles.forEach((h) => Promise.resolve(h).then((x) => x?.remove?.()).catch(() => {}));
   };
 };

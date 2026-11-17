@@ -1,13 +1,8 @@
 import React, { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import Hls from "hls.js";
 import "./Player.css";
-import {
-  nativeMediaSessionInit,
-  nativeSetMetadata,
-  nativeSetPlaybackState,
-  nativeSetPositionState,
-  nativeAddMediaButtonListeners,
-} from "../lib/nativeMediaSession";
+import { audioEngine } from "../lib/audioEngine";
+import useMediaSession from "../hooks/useMediaSession";
 
 // How long we trust a resolved stream URL client-side before re-resolving.
 // Kept comfortably under the server's own 2h cache window (see
@@ -26,7 +21,7 @@ import {
 } from "../streamClient";
 import ArtistPage, { ArtistSearchCard } from "./ArtistPage";
 
-const PREFETCH_AFTER_PLAY_MS = 2000; // next-track pre-resolve starts this long after the current song begins playing
+const PREFETCH_AFTER_PLAY_MS = 250; // next-track pre-resolve starts this long after the current song begins playing
 const BG_PLAYLIST_GAP_MS = 1500; // pause between sequential background playlist fetches
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
 
@@ -122,53 +117,6 @@ const rampAudioVolume = (el, from, to, durationMs, rafRef, onDone) => {
   rafRef.current = requestAnimationFrame(step);
 };
 
-// Lock-screen / notification artwork. Phones draw this in a square slot, and
-// a tall portrait wallpaper declared as "512x512" (or mixed in with the app
-// icons) often ends up ignored or replaced by the icon. So: centre-crop the
-// current wallpaper to a real 512x512 JPEG once, and hand that to the Media
-// Session under every size the OS may ask for. Cached per wallpaper URL.
-const squareArtworkCache = new Map(); // url -> Promise<string|null>
-const makeSquareArtwork = (url, size = 512) => {
-  if (!url || typeof document === "undefined") return Promise.resolve(null);
-  if (squareArtworkCache.has(url)) return squareArtworkCache.get(url);
-  const p = new Promise((resolve) => {
-    const img = new Image();
-    img.decoding = "async";
-    img.onload = () => {
-      try {
-        const side = Math.min(img.naturalWidth, img.naturalHeight);
-        if (!side) return resolve(null);
-        const canvas = document.createElement("canvas");
-        canvas.width = size;
-        canvas.height = size;
-        const ctx = canvas.getContext("2d");
-        ctx.drawImage(
-          img,
-          (img.naturalWidth - side) / 2,
-          (img.naturalHeight - side) / 2,
-          side,
-          side,
-          0,
-          0,
-          size,
-          size
-        );
-        canvas.toBlob(
-          (blob) => resolve(blob ? URL.createObjectURL(blob) : canvas.toDataURL("image/jpeg", 0.85)),
-          "image/jpeg",
-          0.85
-        );
-      } catch (err) {
-        resolve(null);
-      }
-    };
-    img.onerror = () => resolve(null);
-    img.src = url;
-  });
-  squareArtworkCache.set(url, p);
-  return p;
-};
-const ARTWORK_SIZES = ["96x96", "128x128", "192x192", "256x256", "384x384", "512x512"];
 
 // Never show tool / provider names in the UI.
 const scrubBrand = (text) =>
@@ -639,6 +587,13 @@ function deriveArtistFromResults(query, results) {
   return best ? { name: best.name, image: null, about: "", description: "Songs from YouTube", derived: true } : null;
 }
 
+// Put a resolved direct stream into the engine's standby <audio> so it is buffered before the
+// current song ends (HLS needs hls.js and can't be preloaded this way).
+const preloadStandby = (id, data) => {
+  if (!id || !data?.url || data.type === "hls") return;
+  audioEngine.preload(id, data.url);
+};
+
 export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroundImageUrl, playRequest, onPlayerApi, onLikedChange }) {
   // Read once, synchronously, before any state is seeded below — several
   // pieces of initial state (active playlist, track index, search pick,
@@ -791,12 +746,13 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
   const sleepTimerTimeoutRef = useRef(null);
   const sleepEndAtRef = useRef(null); // wall-clock end time; checked from audio events too, since a setTimeout alone can be delayed/skipped on a locked phone
 
-  const audioRef = useRef(null);
+  // Always points at the engine's ACTIVE <audio> element (primary <-> standby swap).
+  const audioRef = useMemo(() => ({ get current() { return audioEngine.getActive(); } }), []);
   // ---------- Crossfade ----------
   // A second, hidden <audio> element used only to play out the *outgoing*
   // track's tail while the primary element loads and fades in the next
   // one — see the "Managed Safe Audio Loading" effect below.
-  const crossfadeAudioRef = useRef(null);
+  const crossfadeAudioRef = useMemo(() => ({ get current() { return audioEngine.getFade(); } }), []);
   const hasLoadedTrackRef = useRef(false); // false only before the very first track ever attaches
   const pendingFadeInRef = useRef(false); // set when the next 'playing' event should ramp volume up instead of jumping to it
   const fadeInRafRef = useRef(null);
@@ -1271,11 +1227,18 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
       await whenPlaybackIdle();
       if (cancelled) return;
       nextTimer = setTimeout(() => {
-        resolveStream(nextTrack.id, { background: true }).catch(() => {
-          retryTimer = setTimeout(() => resolveStream(nextTrack.id, { forceRefresh: true }).catch(() => {}), 4000);
-        });
+        resolveStream(nextTrack.id, { background: true })
+          .then((data) => { if (!cancelled) preloadStandby(nextTrack.id, data); })
+          .catch(() => {
+            retryTimer = setTimeout(
+              () => resolveStream(nextTrack.id, { forceRefresh: true })
+                .then((data) => { if (!cancelled) preloadStandby(nextTrack.id, data); })
+                .catch(() => {}),
+              4000
+            );
+          });
         if (afterTrack && afterTrack.id !== nextTrack.id && afterTrack.id !== currentTrack?.id) {
-          afterTimer = setTimeout(() => resolveStream(afterTrack.id, { background: true }).catch(() => {}), 1500);
+          afterTimer = setTimeout(() => resolveStream(afterTrack.id, { background: true }).catch(() => {}), 800);
         }
       }, PREFETCH_AFTER_PLAY_MS);
     }, 0);
@@ -1332,7 +1295,7 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
       preAttachedIdRef.current = null;
       hasLoadedTrackRef.current = true;
       setCurrentTime(0);
-      setDuration(0);
+      setDuration(Number.isFinite(audio.duration) ? audio.duration : 0);
       setPlaybackError(null);
       setIsTrackLoading(false);
       return () => {
@@ -1340,6 +1303,28 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
       };
     }
     preAttachedIdRef.current = null;
+
+    // Next track already buffered in the standby element (manual Next, lock-screen Next,
+    // queue advance): swap instantly instead of resolving + loading again.
+    if (isPlaying && audioEngine.standbyFor(currentTrack.id)) {
+      if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
+      const res = audioEngine.activateStandby({ volume, loop: repeatOne });
+      if (res) {
+        hasLoadedTrackRef.current = true;
+        setCurrentTime(0);
+        setDuration(Number.isFinite(res.el.duration) ? res.el.duration : 0);
+        setPlaybackError(null);
+        setIsTrackLoading(false);
+        res.promise?.catch((err) => {
+          if (err?.name === "AbortError") return;
+          console.warn("Standby play blocked:", err?.message || err);
+          setIsPlaying(false);
+        });
+        return () => {
+          cancelled = true;
+        };
+      }
+    }
 
     // ---------- Crossfade out the previous track ----------
     // Only once we've already had a real track playing (never on the very
@@ -1488,155 +1473,65 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
     };
   }, [currentTrack?.id, activePlaylistId, currentIndex, activeSource, searchTrack, volume]);
 
-  // ---------- Media Session API ----------
-  // Powers lock-screen / notification-shade playback controls and
-  // earphone/Bluetooth media buttons — without this, backgrounding the tab
-  // or locking the phone leaves the listener with no way to control
-  // playback at all.
-  // Native (Android app shell) media session — starts the foreground
-  // service + notification the first time a track is loaded. No-ops on
-  // regular web.
-  useEffect(() => {
-    nativeMediaSessionInit();
-  }, []);
-
+  // ---------- Media Session (lock screen / notification / headset) ----------
   currentTrackIdRef.current = currentTrack?.id || null;
-
-  useEffect(() => {
-    if (!currentTrack) return;
-    const title = currentTrack.title || "Raunaknama";
-    const artist =
-      activeSource === "search"
-        ? currentTrack.channel || "Raunaknama"
-        : playlist?.playlistTitle || "Raunaknama";
-
-    if ("mediaSession" in navigator) {
-      try {
-        // Same backdrop photo used for the native app's notification —
-        // put it first so browsers that support MediaImage prefer it over
-        // the static app icon fallback.
-        const iconArtwork = [
-          { src: "/icon-192.png", sizes: "192x192", type: "image/png" },
-          { src: "/icon-512.png", sizes: "512x512", type: "image/png" },
-        ];
-        const publish = (wallpaperSrc, mime) => {
-          const artwork = wallpaperSrc
-            ? ARTWORK_SIZES.map((sizes) => ({ src: wallpaperSrc, sizes, type: mime }))
-            : iconArtwork;
-          navigator.mediaSession.metadata = new window.MediaMetadata({
-            title,
-            artist,
-            album: "Raunaknama",
-            artwork,
-          });
-        };
-        // Right away (never leave the shade without a title), with the raw
-        // wallpaper if there is one…
-        publish(backgroundImageUrl ? new URL(backgroundImageUrl, window.location.origin).href : null, "image/jpeg");
-        // …then upgrade to the properly square-cropped version.
-        if (backgroundImageUrl) {
-          const wanted = currentTrack.id;
-          makeSquareArtwork(backgroundImageUrl).then((squareSrc) => {
-            if (!squareSrc || currentTrackIdRef.current !== wanted) return;
-            try {
-              publish(squareSrc, squareSrc.startsWith("data:") ? "image/jpeg" : "image/jpeg");
-            } catch (err) {
-              // ignore
-            }
-          });
+  useMediaSession({
+    track: currentTrack
+      ? {
+          id: currentTrack.id,
+          title: currentTrack.title,
+          artist:
+            activeSource === "search"
+              ? currentTrack.channel || "RaunakNama"
+              : playlist?.playlistTitle || "RaunakNama",
+          artworkUrl: backgroundImageUrl || "/icon-512.png",
         }
-      } catch (err) {
-        // Not supported in this browser — harmless to skip.
-      }
-    }
-
-    nativeSetMetadata({
-      title,
-      artist,
-      album: "Raunaknama",
-      // Use the same rotating backdrop photo currently showing on-screen
-      // for this track, instead of the static app icon — falls back to
-      // the icon if, for some reason, no backdrop URL is available yet.
-      artworkUrl: `${window.location.origin}${backgroundImageUrl || "/icon-512.png"}`,
-    });
-  }, [
-    currentTrack?.id,
-    currentTrack?.title,
-    currentTrack?.channel,
-    activeSource,
-    playlist?.playlistTitle,
-    backgroundImageUrl,
-  ]);
-
-  useEffect(() => {
-    if ("mediaSession" in navigator) {
-      navigator.mediaSession.playbackState = isPlaying ? "playing" : "paused";
-    }
-    nativeSetPlaybackState(isPlaying);
-  }, [isPlaying]);
-
-  // Re-registered every render (cheap) so each handler always closes over
-  // the latest handleNext/handlePrev/audioRef — these aren't memoized, so a
-  // one-time (mount-only) registration would go stale after the first
-  // track change.
-  useEffect(() => {
-    if (!("mediaSession" in navigator)) return;
-    const ms = navigator.mediaSession;
-    const setHandler = (action, handler) => {
-      try {
-        ms.setActionHandler(action, handler);
-      } catch (err) {
-        // Action not supported in this browser — harmless to skip.
-      }
-    };
-
-    setHandler("play", () => {
-      const audio = audioRef.current;
-      if (audio) audio.play().catch(() => {});
-    });
-    setHandler("pause", () => {
-      audioRef.current?.pause();
-    });
-    setHandler("previoustrack", () => handlePrev());
-    setHandler("nexttrack", () => handleNext());
-    setHandler("seekbackward", (details) => {
-      const audio = audioRef.current;
-      if (!audio) return;
-      audio.currentTime = Math.max(0, audio.currentTime - (details.seekOffset || 10));
-    });
-    setHandler("seekforward", (details) => {
-      const audio = audioRef.current;
-      if (!audio) return;
-      audio.currentTime = Math.min(
-        audio.duration || Infinity,
-        audio.currentTime + (details.seekOffset || 10)
-      );
-    });
-    setHandler("seekto", (details) => {
-      const audio = audioRef.current;
-      if (audio && details.seekTime != null) audio.currentTime = details.seekTime;
-    });
-
-    // Same handlers, wired up to the native notification / lock-screen
-    // controls added by the Android project's MediaNotificationPlugin.
-    const removeNativeListeners = nativeAddMediaButtonListeners({
-      onPlay: () => audioRef.current?.play().catch(() => {}),
-      onPause: () => audioRef.current?.pause(),
-      onNext: () => handleNext(),
-      onPrevious: () => handlePrev(),
-      onSeek: (positionSecs) => {
-        const audio = audioRef.current;
-        if (audio && positionSecs != null) audio.currentTime = positionSecs;
-      },
-    });
-
-    return () => {
-      ["play", "pause", "previoustrack", "nexttrack", "seekbackward", "seekforward", "seekto"].forEach(
-        (action) => setHandler(action, null)
-      );
-      removeNativeListeners();
-    };
+      : null,
+    isPlaying,
+    actions: { onNext: () => handleNext(), onPrevious: () => handlePrev() },
   });
+
+  // ---------- Audio engine events (both <audio> elements) ----------
+  // Only the ACTIVE element's events drive the UI; the retired/standby one is ignored, so the
+  // pause + ended of the old track can't flicker the UI or the lock-screen card.
+  const engineHandlersRef = useRef({});
+  engineHandlersRef.current = {
+    playing: () => handleAudioPlaying(),
+    ended: () => handleTrackEnded(),
+    timeUpdate: () => handleTimeUpdate(),
+    loadedMetadata: () => handleLoadedMetadata(),
+    error: () => handleAudioError(),
+  };
+  useEffect(() => {
+    audioEngine.installUnlock();
+    return audioEngine.subscribe((type, e, isActive) => {
+      const h = engineHandlersRef.current;
+      if (!isActive) {
+        // A standby stream that failed to buffer is dropped; the normal path takes over.
+        if (type === "error" && audioEngine.standbyId()) audioEngine.clearStandby();
+        return;
+      }
+      switch (type) {
+        case "play": setIsPlaying(true); break;
+        case "playing": h.playing(); break;
+        case "pause": if (!e.target.ended) setIsPlaying(false); break;
+        case "ended": h.ended(); break;
+        case "timeupdate": h.timeUpdate(); break;
+        case "loadedmetadata": h.loadedMetadata(); break;
+        case "durationchange":
+          if (Number.isFinite(e.target.duration)) setDuration(e.target.duration);
+          break;
+        case "error": h.error(); break;
+        default:
+      }
+    });
+  }, []);
+  useEffect(
+    () => () => {
+      audioEngine.stopKeepAlive();
+    },
+    []
+  );
 
   // ---------- Keyboard shortcuts ----------
   // Space: play/pause · ←/→: seek 5s · ↑/↓: volume · N/P: next/prev track.
@@ -2097,6 +1992,8 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
 
   const handleAudioPlaying = () => {
     releaseResolveGate(); // background prefetch / playlist loading may resume now
+    audioEngine.stopKeepAlive();
+    ensureStandbyRef.current?.();
     consecutiveFailures.current = 0;
     if (currentTrack?.id) {
       retriedTrackIdsRef.current.delete(currentTrack.id);
@@ -2220,7 +2117,9 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
       .then((next) => {
         if (cancelled || !next) return;
         prefetchedAutoplayRef.current = { seedId: seed.id, track: next };
-        resolveStream(next.id, { background: true }).catch(() => {});
+        resolveStream(next.id, { background: true })
+          .then((data) => { if (!cancelled) preloadStandby(next.id, data); })
+          .catch(() => {});
       })
       .catch(() => {});
 
@@ -2251,47 +2150,68 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
   // synchronously, inside the "ended" event. A locked phone gives the page
   // almost no time after audio stops — waiting for a React render and a
   // network call is exactly where "next song never plays" came from.
-  const tryInstantAdvance = () => {
-    const audio = audioRef.current;
-    if (!audio) return;
-
-    let nextTrack = null;
+  const getNextTrack = () => {
     if (activeSource === "search") {
       const pre = prefetchedAutoplayRef.current;
-      if (pre && pre.seedId === currentTrack?.id) nextTrack = pre.track;
-    } else if (playlist && playlist.tracks.length > 1) {
+      return pre && pre.seedId === currentTrack?.id ? pre.track : null;
+    }
+    if (playlist && playlist.tracks.length > 1) {
       const nextIdx =
         shuffle && shuffleOrder.length
           ? shuffleOrder[(shuffleOrder.indexOf(currentIndex) + 1) % shuffleOrder.length]
           : (currentIndex + 1) % playlist.tracks.length;
-      nextTrack = playlist.tracks[nextIdx] || null;
+      return playlist.tracks[nextIdx] || null;
     }
-    if (!nextTrack) return;
+    return null;
+  };
 
-    const data = peekStream(nextTrack.id);
-    if (!data || data.type === "hls") return; // not cached (or needs hls.js) — normal path handles it
+  // Makes sure the next track is buffered in the standby <audio> (cache hit = instant).
+  const ensureStandby = () => {
+    const next = getNextTrack();
+    if (!next || audioEngine.standbyFor(next.id)) return;
+    const hit = peekStream(next.id);
+    if (hit) preloadStandby(next.id, hit);
+    else resolveStream(next.id, { background: true }).then((d) => preloadStandby(next.id, d)).catch(() => {});
+  };
+  const ensureStandbyRef = useRef(null);
+  ensureStandbyRef.current = ensureStandby;
+  const standbyHalfwayRef = useRef(null); // track id for which the 50% safety preload already ran
 
-    try {
-      if (hlsRef.current) {
-        hlsRef.current.destroy();
-        hlsRef.current = null;
-      }
-      loadTokenRef.current += 1;
-      preAttachedIdRef.current = nextTrack.id;
-      audio.volume = volume; // no fade ramps: they need rAF, which a hidden tab never gets
-      audio.src = data.url;
-      audio.load();
-      const p = audio.play();
-      if (p !== undefined) {
-        p.catch((err) => {
-          if (err.name === "AbortError") return;
-          console.warn("Instant advance play blocked:", err.message || err);
-          if (preAttachedIdRef.current === nextTrack.id) preAttachedIdRef.current = null;
-        });
-      }
-    } catch (err) {
-      preAttachedIdRef.current = null;
+  // Hand over to the next track RIGHT NOW, synchronously inside the "ended" event: play() the
+  // already-buffered standby element and make it the active one. Works with the screen locked
+  // because no network call / React render is needed first.
+  const tryInstantAdvance = () => {
+    const next = getNextTrack();
+    if (!next) return false;
+    if (!audioEngine.standbyFor(next.id)) {
+      const hit = peekStream(next.id);
+      if (hit && hit.type !== "hls") audioEngine.preload(next.id, hit.url);
     }
+    if (!audioEngine.standbyFor(next.id)) {
+      // Nothing buffered: keep the page audibly "alive" while the normal path resolves it.
+      audioEngine.startKeepAlive();
+      return false;
+    }
+    if (hlsRef.current) {
+      hlsRef.current.destroy();
+      hlsRef.current = null;
+    }
+    const res = audioEngine.activateStandby({ volume, loop: false });
+    if (!res) {
+      audioEngine.startKeepAlive();
+      return false;
+    }
+    loadTokenRef.current += 1;
+    preAttachedIdRef.current = next.id;
+    standbyHalfwayRef.current = null;
+    if (Number.isFinite(res.el.duration)) setDuration(res.el.duration);
+    res.promise?.catch((err) => {
+      if (err?.name === "AbortError") return;
+      console.warn("Instant advance play blocked:", err?.message || err);
+      if (preAttachedIdRef.current === next.id) preAttachedIdRef.current = null;
+      setIsPlaying(false);
+    });
+    return true;
   };
 
   const handleTrackEnded = () => {
@@ -2663,7 +2583,6 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
     if (audioRef.current) audioRef.current.volume = value;
   };
 
-  const lastPositionStateRef = useRef(0);
 
   // Stops playback once the sleep timer's end time has passed. Returns true if
   // it fired. Safe to call any number of times (idempotent).
@@ -2677,6 +2596,7 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
       sleepTimerTimeoutRef.current = null;
     }
     preAttachedIdRef.current = null;
+    audioEngine.stopKeepAlive();
     const audio = audioRef.current;
     if (audio) audio.pause();
     setIsPlaying(false);
@@ -2723,6 +2643,7 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
       !repeatOne &&
       !document.hidden &&
       !earlyAdvanceFiredRef.current &&
+      !audioEngine.standbyFor(getNextTrack()?.id) && // standby ready: the gapless swap on "ended" is better
       Number.isFinite(audio.duration) &&
       audio.duration > EARLY_ADVANCE_SECS * 2 &&
       audio.currentTime > 0 &&
@@ -2737,27 +2658,17 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
       }
     }
 
-    // Keep the lock-screen / notification scrubber in sync — throttled so
-    // we're not calling this on every ~250ms timeupdate tick.
-    if (audio.duration && Number.isFinite(audio.duration)) {
-      const now = Date.now();
-      if (now - lastPositionStateRef.current > 900) {
-        lastPositionStateRef.current = now;
-        const position = Math.min(audio.currentTime, audio.duration);
-        const playbackRate = audio.playbackRate || 1;
-        if ("mediaSession" in navigator) {
-          try {
-            navigator.mediaSession.setPositionState({
-              duration: audio.duration,
-              playbackRate,
-              position,
-            });
-          } catch (err) {
-            // Not supported in this browser — harmless to skip.
-          }
-        }
-        nativeSetPositionState(audio.duration, position, playbackRate);
-      }
+    // Halfway through: make sure the next track is buffered in standby (safety net in case the
+    // early prefetch failed or the page was busy). Position state: see useMediaSession.
+    if (
+      currentTrack?.id &&
+      standbyHalfwayRef.current !== currentTrack.id &&
+      Number.isFinite(audio.duration) &&
+      audio.duration > 0 &&
+      audio.currentTime / audio.duration >= 0.5
+    ) {
+      standbyHalfwayRef.current = currentTrack.id;
+      ensureStandbyRef.current?.();
     }
   };
 
@@ -3496,23 +3407,7 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
               </p>
             </div>
 
-            <audio
-              ref={audioRef}
-              preload="auto"
-              onPlay={() => setIsPlaying(true)}
-              onPlaying={handleAudioPlaying}
-              onPause={() => setIsPlaying(false)}
-              onEnded={handleTrackEnded}
-              onTimeUpdate={handleTimeUpdate}
-              onLoadedMetadata={handleLoadedMetadata}
-              onError={handleAudioError}
-              className="native-audio"
-            />
-
-            {/* Hidden — used only to play out the tail of the outgoing
-                track while it crossfades to silence (see the "Managed Safe
-                Audio Loading" effect). Never exposed to any controls. */}
-            <audio ref={crossfadeAudioRef} className="native-audio" aria-hidden="true" />
+            {/* Audio lives in src/lib/audioEngine.js: two persistent <audio> elements (primary + standby). */}
 
             {playbackError && (
               <p className="state-sub playback-error-note" role="status">
