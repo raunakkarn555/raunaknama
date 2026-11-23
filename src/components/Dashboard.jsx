@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import "./Dashboard.css";
+import Icon from "./Icon";
 
 const STREAM_ENDPOINT = "/api/stream";
 const streamUrl = (token) => `${STREAM_ENDPOINT}?token=${encodeURIComponent(token)}`;
@@ -181,6 +182,129 @@ const SECTION_SEEDS = [
   { title: "Workout Beats", q: "bollywood workout songs" },
   { title: "Love Songs", q: "hindi love songs" },
 ];
+// Mood chips on the Recommended page. "all" keeps the original mixed feed;
+// every other mood only draws shelves from its own seed list.
+const MOODS = [
+  { id: "all", label: "All", icon: "sparkles" },
+  { id: "romantic", label: "Romantic", icon: "heart" },
+  { id: "party", label: "Party", icon: "party" },
+  { id: "sad", label: "Sad", icon: "heartCrack" },
+  { id: "retro90", label: "Retro 90s", icon: "tape" },
+  { id: "workout", label: "Workout", icon: "dumbbell" },
+];
+const MOOD_SEEDS = {
+  romantic: [
+    { title: "Love Songs", q: "hindi love songs" },
+    { title: "Romantic Hits", q: "bollywood romantic songs" },
+    { title: "Arijit Singh Romance", q: "arijit singh romantic" },
+    { title: "Jubin Nautiyal Love", q: "jubin nautiyal romantic" },
+    { title: "Shreya Ghoshal Melodies", q: "shreya ghoshal romantic" },
+    { title: "Evergreen Duets", q: "bollywood duets" },
+    { title: "Atif Aslam Love", q: "atif aslam romantic" },
+    { title: "Rahat Fateh Ali Khan", q: "rahat fateh ali khan romantic" },
+    { title: "Nusrat Fateh Ali Khan Love", q: "nusrat fateh ali khan love songs" },
+    { title: "Armaan Malik Romance", q: "armaan malik romantic" },
+    { title: "Darshan Raval Love", q: "darshan raval romantic" },
+    { title: "B Praak Love", q: "b praak romantic" },
+    { title: "Sonu Nigam Melodies", q: "sonu nigam romantic" },
+    { title: "Mohit Chauhan Soul", q: "mohit chauhan romantic" },
+    { title: "Papon Magic", q: "papon love songs" },
+    { title: "Neha Kakkar Love", q: "neha kakkar romantic" },
+    { title: "Palak Muchhal Love", q: "palak muchhal romantic" },
+    { title: "Kumar Sanu Romance", q: "kumar sanu romantic" },
+    { title: "Lata & Kishore Classics", q: "lata mangeshkar kishore kumar duets" },
+    { title: "Mohammed Rafi Romance", q: "mohammed rafi romantic" },
+    { title: "Shaan Love", q: "shaan romantic songs" },
+    { title: "Sufi Romance", q: "sufi love songs" },
+    { title: "Punjabi Love", q: "punjabi romantic songs" },
+    { title: "Ghazal Love", q: "romantic ghazal" },
+  ],
+  party: [
+    { title: "Party Mode", q: "bollywood party songs" },
+    { title: "Dance Floor", q: "bollywood dance songs" },
+    { title: "Punjabi Party", q: "punjabi party songs" },
+    { title: "Wedding Season", q: "bollywood wedding songs" },
+    { title: "Badshah Party", q: "badshah party" },
+    { title: "Honey Singh Party", q: "yo yo honey singh party" },
+    { title: "Diljit Dosanjh", q: "diljit dosanjh party" },
+    { title: "Guru Randhawa", q: "guru randhawa party" },
+    { title: "AP Dhillon", q: "ap dhillon" },
+    { title: "Karan Aujla", q: "karan aujla" },
+    { title: "Mika Singh", q: "mika singh party" },
+    { title: "Neha Kakkar Party", q: "neha kakkar party songs" },
+    { title: "Sunidhi Chauhan Beats", q: "sunidhi chauhan dance" },
+    { title: "Raftaar & Divine", q: "raftaar divine hindi rap" },
+    { title: "Club Anthems", q: "hindi club songs" },
+    { title: "Remix Hits", q: "bollywood remix party" },
+    { title: "Sangeet Night", q: "sangeet dance songs" },
+    { title: "Dhol Beats", q: "bhangra dhol songs" },
+    { title: "Item Numbers", q: "bollywood item songs" },
+    { title: "Road Trip", q: "hindi road trip songs" },
+  ],
+  sad: [
+    { title: "Heartbreak", q: "hindi sad songs" },
+    { title: "Arijit Singh Sad", q: "arijit singh sad songs" },
+    { title: "Broken Heart Ghazals", q: "sad ghazal" },
+    { title: "Late Night Pain", q: "hindi late night sad songs" },
+    { title: "KK Emotional", q: "kk sad songs" },
+    { title: "Sad Retro", q: "old hindi sad songs" },
+    { title: "Rahat Fateh Ali Khan Sad", q: "rahat fateh ali khan sad songs" },
+    { title: "Nusrat Fateh Ali Khan Qawwali", q: "nusrat fateh ali khan sad" },
+    { title: "Atif Aslam Sad", q: "atif aslam sad songs" },
+    { title: "Jubin Nautiyal Sad", q: "jubin nautiyal sad songs" },
+    { title: "Mohit Chauhan Sad", q: "mohit chauhan sad songs" },
+    { title: "Sonu Nigam Sad", q: "sonu nigam sad songs" },
+    { title: "B Praak Sad", q: "b praak sad songs" },
+    { title: "Ankit Tiwari Sad", q: "ankit tiwari sad songs" },
+    { title: "Armaan Malik Sad", q: "armaan malik sad songs" },
+    { title: "Jagjit Singh Ghazals", q: "jagjit singh sad ghazal" },
+    { title: "Mohammed Rafi Dard", q: "mohammed rafi sad songs" },
+    { title: "Mukesh Dard Bhare", q: "mukesh sad songs" },
+    { title: "Lucky Ali Soul", q: "lucky ali sad songs" },
+    { title: "Bewafa Songs", q: "bewafa songs hindi" },
+    { title: "Judaai", q: "judaai hindi songs" },
+    { title: "Punjabi Sad", q: "punjabi sad songs" },
+    { title: "Lofi Sad", q: "hindi sad lofi" },
+  ],
+  retro90: [
+    { title: "90s Romance", q: "90s bollywood romantic" },
+    { title: "Kumar Sanu 90s", q: "kumar sanu 90s" },
+    { title: "Udit Narayan 90s", q: "udit narayan 90s" },
+    { title: "Alka Yagnik 90s", q: "alka yagnik 90s" },
+    { title: "90s Bollywood Hits", q: "90s bollywood hits" },
+    { title: "90s Dance", q: "90s bollywood dance songs" },
+    { title: "Sonu Nigam 90s", q: "sonu nigam 90s" },
+    { title: "Abhijeet 90s", q: "abhijeet bhattacharya 90s" },
+    { title: "Kavita Krishnamurthy", q: "kavita krishnamurthy 90s" },
+    { title: "Sadhana Sargam", q: "sadhana sargam 90s" },
+    { title: "Anuradha Paudwal", q: "anuradha paudwal 90s" },
+    { title: "Jatin Lalit Hits", q: "jatin lalit 90s" },
+    { title: "Nadeem Shravan Hits", q: "nadeem shravan 90s" },
+    { title: "A R Rahman 90s", q: "ar rahman 90s hindi" },
+    { title: "Shah Rukh 90s", q: "shah rukh khan 90s songs" },
+    { title: "Govinda Hits", q: "govinda 90s songs" },
+    { title: "Aamir Khan 90s", q: "aamir khan 90s songs" },
+    { title: "Sad 90s", q: "90s bollywood sad songs" },
+  ],
+  workout: [
+    { title: "Workout Beats", q: "bollywood workout songs" },
+    { title: "Gym Motivation", q: "hindi gym motivation songs" },
+    { title: "High Energy", q: "bollywood high energy songs" },
+    { title: "Running Playlist", q: "hindi running songs" },
+    { title: "Pump Up", q: "bollywood pump up songs" },
+    { title: "Sports Anthems", q: "bollywood sports songs" },
+    { title: "Divine Hustle", q: "divine hindi rap" },
+    { title: "Raftaar Rap", q: "raftaar rap songs" },
+    { title: "Emiway Bantai", q: "emiway bantai" },
+    { title: "Badshah Energy", q: "badshah high energy" },
+    { title: "Diljit Power", q: "diljit dosanjh energy" },
+    { title: "Sukhwinder Singh", q: "sukhwinder singh energetic" },
+    { title: "Farhan Akhtar Motivation", q: "farhan akhtar motivational songs" },
+    { title: "Sidhu Moose Wala", q: "sidhu moose wala" },
+    { title: "Motivational Hindi", q: "hindi motivational songs" },
+    { title: "Deshbhakti Josh", q: "deshbhakti josh songs" },
+  ],
+};
 const QUERY_SUFFIXES = ["", " songs", " best", " hits", " evergreen", " top"];
 const SECTION_SIZE = 12;   // cards per shelf
 const MIN_NEW_PER_SECTION = 4;
@@ -276,7 +400,7 @@ const shuffle = (arr) => {
  * pagination whenever failover switched instances). Failed or unproductive
  * searches are skipped silently; an error shows only after repeated failures.
  */
-function usePipedFeed() {
+function usePipedFeed(mood = "all") {
   const [sections, setSections] = useState([]);
   const [status, setStatus] = useState("idle"); // idle | loading | error | end
   const seen = useRef(new Set());
@@ -286,15 +410,37 @@ function usePipedFeed() {
   const dry = useRef(0);
   const ctrlRef = useRef(null);
   const sectionNo = useRef(0);
+  const genRef = useRef(0);      // bumps on every mood change so stale loads are ignored
+  const moodRef = useRef(mood);
+  moodRef.current = mood;
 
   const nextSeed = () => {
-    if (!queue.current.length) queue.current = shuffle(SECTION_SEEDS);
+    if (!queue.current.length) {
+      queue.current = shuffle(moodRef.current === "all" ? SECTION_SEEDS : (MOOD_SEEDS[moodRef.current] || SECTION_SEEDS));
+    }
     return queue.current.pop();
   };
+
+  // Switching mood: drop everything from the previous mood and start fresh.
+  const firstRun = useRef(true);
+  useEffect(() => {
+    if (firstRun.current) { firstRun.current = false; return; }
+    genRef.current += 1;
+    ctrlRef.current?.abort();
+    busy.current = false;
+    seen.current = new Set();
+    queue.current = [];
+    fails.current = 0;
+    dry.current = 0;
+    sectionNo.current = 0;
+    setSections([]);
+    setStatus("idle");
+  }, [mood]);
 
   const loadMore = useCallback(async () => {
     if (busy.current || status === "end") return;
     busy.current = true;
+    const gen = genRef.current;
     setStatus("loading");
     const ctrl = new AbortController();
     ctrlRef.current = ctrl;
@@ -307,12 +453,13 @@ function usePipedFeed() {
           data = await pipedGet("/search", { q: seed.q + suffix, filter: PIPED_FILTER }, ctrl.signal);
           fails.current = 0;
         } catch (err) {
-          if (ctrl.signal.aborted) throw err;
+          if (ctrl.signal.aborted || gen !== genRef.current) throw err;
           fails.current += 1;
           if (fails.current >= MAX_CONSECUTIVE_FAILS) throw err;
           continue; // silently try another search
         }
 
+        if (gen !== genRef.current) return; // mood changed while this was loading
         const fresh = [];
         for (const raw of data?.items || []) {
           const t = toTrack(raw);
@@ -332,9 +479,10 @@ function usePipedFeed() {
       }
       setStatus("idle"); // nothing usable this round; the next scroll check tries again
     } catch (err) {
+      if (gen !== genRef.current) return;
       setStatus(ctrl.signal.aborted ? "idle" : "error");
     } finally {
-      busy.current = false;
+      if (gen === genRef.current) busy.current = false;
     }
   }, [status]);
 
@@ -364,7 +512,7 @@ function MediaCard({ item, engine }) {
       onPointerLeave={engine.cancelWarm}
     >
       <div className="card-art">
-        {item.thumbnailUrl ? <img src={item.thumbnailUrl} alt="" loading="lazy" decoding="async" /> : <span className="art-fallback">♪</span>}
+        {item.thumbnailUrl ? <img src={item.thumbnailUrl} alt="" loading="lazy" decoding="async" /> : <span className="art-fallback"><Icon name="music" /></span>}
         <button
           type="button"
           className="fab"
@@ -398,7 +546,7 @@ function SuggestionRow({ item, engine }) {
         aria-label={`${playing ? "Pause" : "Play"} ${item.title} by ${item.subtitle}`}
       >
         <span className="row-thumb">
-          {item.thumbnailUrl ? <img src={item.thumbnailUrl} alt="" loading="lazy" decoding="async" /> : <span className="art-fallback">♪</span>}
+          {item.thumbnailUrl ? <img src={item.thumbnailUrl} alt="" loading="lazy" decoding="async" /> : <span className="art-fallback"><Icon name="music" /></span>}
         </span>
         <span className="row-meta">
           <span className="row-title">{item.title}</span>
@@ -475,7 +623,7 @@ function ModeSwitch({ mode, onChange }) {
 
 const RecoHeartIcon = ({ filled }) => (
   <svg viewBox="0 0 24 24" width="14" height="14" fill={filled ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-    <path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1-1.1a5.5 5.5 0 0 0-7.8 7.8l1 1.1L12 21l7.8-7.5 1-1.1a5.5 5.5 0 0 0 0-7.8z" />
+    <path d="M12 21s-7.5-4.6-10-9.3C.6 8.4 2.3 5 5.7 5c2 0 3.4 1.1 4.3 2.4C10.9 6.1 12.3 5 14.3 5c3.4 0 5.1 3.4 3.7 6.7C19.5 16.4 12 21 12 21z" />
   </svg>
 );
 const RecoPlusIcon = () => (
@@ -502,7 +650,7 @@ function RecoCard({ item, isCurrent, playing, liked = false, onSelect, onWarm, o
         <span className="rc-art">
           {item.thumbnailUrl
             ? <img src={item.thumbnailUrl} alt="" loading="lazy" decoding="async" referrerPolicy="no-referrer" />
-            : <span className="art-fallback">♪</span>}
+            : <span className="art-fallback"><Icon name="music" /></span>}
           {item.duration && <span className="rc-dur">{item.duration}</span>}
           <span className="rc-play"><PlayIcon playing={playing} /></span>
         </span>
@@ -514,7 +662,7 @@ function RecoCard({ item, isCurrent, playing, liked = false, onSelect, onWarm, o
           {onToggleLike && (
             <button
               type="button"
-              className={`rc-act ${liked ? "is-liked" : ""}`}
+              className={`rc-act like-btn ${liked ? "is-liked" : ""}`}
               aria-label={liked ? `Unlike ${item.title}` : `Like ${item.title}`}
               aria-pressed={liked}
               onClick={() => onToggleLike(item)}
@@ -540,7 +688,8 @@ function RecoCard({ item, isCurrent, playing, liked = false, onSelect, onWarm, o
 
 /** Host-agnostic grid: the host decides how a picked track is played. */
 export function RecommendedGrid({ currentId, playing = false, likedIds, onSelect, onWarm, onCancelWarm, onToggleLike, onAddToPlaylist }) {
-  const { sections, status, loadMore, retry } = usePipedFeed();
+  const [mood, setMood] = useState("all");
+  const { sections, status, loadMore, retry } = usePipedFeed(mood);
   const enabled = status === "idle";
   // Re-subscribes (and re-checks position) each time a shelf lands, so the
   // first shelf loads immediately and a tall viewport keeps filling.
@@ -565,6 +714,20 @@ export function RecommendedGrid({ currentId, playing = false, likedIds, onSelect
         <span className="reco-chip" aria-hidden="true" />
         <h2 id="reco-title" className="reco-title">Recommended For You</h2>
         <p className="reco-sub">Fresh picks every visit — keep scrolling.</p>
+        <div className="mood-chips" role="tablist" aria-label="Pick a mood">
+          {MOODS.map((m) => (
+            <button
+              key={m.id}
+              type="button"
+              role="tab"
+              aria-selected={mood === m.id}
+              className={`mood-chip ${mood === m.id ? "is-active" : ""}`}
+              onClick={() => setMood(m.id)}
+            >
+              <Icon name={m.icon} /> {m.label}
+            </button>
+          ))}
+        </div>
       </header>
 
       {sections.map((sec) => (

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import "./ArtistPage.css";
+import Icon from "./Icon";
 import { warmStream } from "../streamClient";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
@@ -159,7 +160,7 @@ export default function ArtistPage({ artist, onClose, renderTrack, onPlay }) {
                 disabled={!songs.length}
                 onClick={() => songs[0] && onPlay?.(songs[0])}
               >
-                ▶ Play
+                <Icon name="play" size="0.9em" /> Play
               </button>
             </div>
           </div>

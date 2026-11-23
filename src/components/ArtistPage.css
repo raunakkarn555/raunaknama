@@ -83,3 +83,4 @@
   .ap-hero-actions { justify-content: center; }
   .ar-avatar--card { width: 58px; height: 58px; }
 }
+.ap-play { display: inline-flex; align-items: center; gap: 8px; }

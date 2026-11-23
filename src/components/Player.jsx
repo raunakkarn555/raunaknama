@@ -20,6 +20,10 @@ import {
   whenPlaybackIdle,
 } from "../streamClient";
 import ArtistPage, { ArtistSearchCard } from "./ArtistPage";
+import SyncedLyrics from "./SyncedLyrics";
+import Icon from "./Icon";
+import AppDownloads from "./AppDownloads";
+import { burstHearts } from "../lib/heartBurst";
 
 const PREFETCH_AFTER_PLAY_MS = 250; // next-track pre-resolve starts this long after the current song begins playing
 const BG_PLAYLIST_GAP_MS = 1500; // pause between sequential background playlist fetches
@@ -164,7 +168,7 @@ const BackIcon = () => (
 const COVER_SIZES = ["hq720", "hqdefault", "mqdefault"];
 function SearchCover({ id }) {
   const [step, setStep] = useState(0);
-  if (step >= COVER_SIZES.length) return <span className="sp-cover-fallback" aria-hidden="true">♪</span>;
+  if (step >= COVER_SIZES.length) return <span className="sp-cover-fallback" aria-hidden="true"><Icon name="music" /></span>;
   return (
     <img
       src={`https://i.ytimg.com/vi/${id}/${COVER_SIZES[step]}.jpg`}
@@ -435,6 +439,190 @@ const parseLRC = (raw) => {
   return lines.sort((a, b) => a.time - b.time);
 };
 
+// --- Playlist share links ---
+// A custom playlist is packed into a compact, URL-safe code (deflate-compressed
+// where the browser supports it) so it can be shared as a normal link:
+//   https://<site>/?pl=<code>
+// Whoever opens the link gets a "Save this playlist?" prompt and, on
+// accept, it becomes one of THEIR on-device custom playlists. Nothing is
+// ever stored on the server — the playlist lives entirely inside the link.
+const SHARE_MAX_TRACKS = 300;
+const YT_ID_RE = /^[\w-]{11}$/;
+
+const bytesToB64Url = (bytes) => {
+  let bin = "";
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+};
+
+const b64UrlToBytes = (str) => {
+  const b64 = str.replace(/-/g, "+").replace(/_/g, "/");
+  const bin = atob(b64 + "=".repeat((4 - (b64.length % 4)) % 4));
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i += 1) out[i] = bin.charCodeAt(i);
+  return out;
+};
+
+const encodePlaylistShare = async (playlist) => {
+  const json = JSON.stringify({
+    v: 1,
+    n: String(playlist.label || "Shared playlist").slice(0, 60),
+    t: playlist.tracks
+      .filter((t) => t && YT_ID_RE.test(t.id || ""))
+      .slice(0, SHARE_MAX_TRACKS)
+      .map((t) => [t.id, t.title || "", t.channel || ""]),
+  });
+  const raw = new TextEncoder().encode(json);
+  if (typeof CompressionStream !== "undefined") {
+    try {
+      const stream = new Blob([raw]).stream().pipeThrough(new CompressionStream("deflate-raw"));
+      const packed = new Uint8Array(await new Response(stream).arrayBuffer());
+      return `z${bytesToB64Url(packed)}`;
+    } catch {
+      /* fall through to the uncompressed form */
+    }
+  }
+  return `r${bytesToB64Url(raw)}`;
+};
+
+const decodePlaylistShare = async (code) => {
+  try {
+    if (!code || code.length < 2 || code.length > 60000) return null;
+    const kind = code[0];
+    let bytes = b64UrlToBytes(code.slice(1));
+    if (kind === "z") {
+      if (typeof DecompressionStream === "undefined") return null;
+      const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
+      bytes = new Uint8Array(await new Response(stream).arrayBuffer());
+    } else if (kind !== "r") {
+      return null;
+    }
+    const data = JSON.parse(new TextDecoder().decode(bytes));
+    if (!data || data.v !== 1 || !Array.isArray(data.t)) return null;
+    const tracks = data.t
+      .filter((row) => Array.isArray(row) && YT_ID_RE.test(row[0] || ""))
+      .slice(0, SHARE_MAX_TRACKS)
+      .map(([id, title, channel]) => ({
+        id,
+        title: String(title || "Untitled").slice(0, 200),
+        channel: channel ? String(channel).slice(0, 120) : null,
+      }));
+    if (!tracks.length) return null;
+    return { label: String(data.n || "Shared playlist").slice(0, 60), tracks };
+  } catch (err) {
+    console.warn("Could not read shared playlist link:", err);
+    return null;
+  }
+};
+
+// --- Listening stats (this device only) ---
+// Seconds listened per day / artist / track, kept for ~5 weeks in
+// localStorage. Feeds the "Your week" card in the menu. Never sent anywhere.
+const LISTENING_STATS_KEY = "raunaknama_listening_stats_v1";
+const STATS_KEEP_DAYS = 35;
+
+const dayKey = (d = new Date()) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+
+const loadListeningStats = () => {
+  try {
+    const raw = window.localStorage.getItem(LISTENING_STATS_KEY);
+    const parsed = raw ? JSON.parse(raw) : null;
+    if (parsed && typeof parsed === "object" && parsed.days) return parsed;
+  } catch (err) {
+    console.warn("Could not read listening stats:", err);
+  }
+  return { v: 1, days: {} };
+};
+
+const persistListeningStats = (stats) => {
+  try {
+    window.localStorage.setItem(LISTENING_STATS_KEY, JSON.stringify(stats));
+  } catch (err) {
+    console.warn("Could not save listening stats:", err);
+  }
+};
+
+const statsArtistName = (track) =>
+  (track?.channel || "").replace(/\s*-\s*topic\s*$/i, "").trim() || "Unknown artist";
+
+const addListeningSeconds = (stats, track, secs) => {
+  if (!track?.id || !(secs > 0)) return stats;
+  const key = dayKey();
+  const day = stats.days[key] || (stats.days[key] = { s: 0, a: {}, t: {} });
+  const artist = statsArtistName(track);
+  day.s += secs;
+  day.a[artist] = (day.a[artist] || 0) + secs;
+  const entry = day.t[track.id] || (day.t[track.id] = { n: track.title || "Untitled", s: 0 });
+  entry.s += secs;
+
+  // Drop anything older than the retention window.
+  const cutoff = Date.now() - STATS_KEEP_DAYS * 86400000;
+  Object.keys(stats.days).forEach((k) => {
+    const t = new Date(`${k}T00:00:00`).getTime();
+    if (Number.isFinite(t) && t < cutoff) delete stats.days[k];
+  });
+  return stats;
+};
+
+const computeWeekStats = (stats) => {
+  const today = new Date();
+  const days = [];
+  for (let i = 6; i >= 0; i -= 1) {
+    const d = new Date(today.getFullYear(), today.getMonth(), today.getDate() - i);
+    const entry = stats.days[dayKey(d)];
+    days.push({ label: d.toLocaleDateString(undefined, { weekday: "narrow" }), secs: entry?.s || 0, isToday: i === 0, entry });
+  }
+  const artists = {};
+  const tracks = {};
+  days.forEach(({ entry }) => {
+    if (!entry) return;
+    Object.entries(entry.a || {}).forEach(([k, v]) => { artists[k] = (artists[k] || 0) + v; });
+    Object.entries(entry.t || {}).forEach(([id, v]) => {
+      const cur = tracks[id] || (tracks[id] = { name: v.n, secs: 0 });
+      cur.secs += v.s;
+    });
+  });
+  const top = (obj, pick) => Object.entries(obj).sort((a, b) => pick(b[1]) - pick(a[1]))[0];
+  const topArtist = top(artists, (v) => v);
+  const topTrack = top(tracks, (v) => v.secs);
+  return {
+    days,
+    totalSecs: days.reduce((n, d) => n + d.secs, 0),
+    maxDay: Math.max(1, ...days.map((d) => d.secs)),
+    topArtist: topArtist ? { name: topArtist[0], secs: topArtist[1] } : null,
+    topTrack: topTrack ? { name: topTrack[1].name, secs: topTrack[1].secs } : null,
+  };
+};
+
+const formatListenTime = (secs) => {
+  const mins = Math.round(secs / 60);
+  if (mins < 1) return secs > 0 ? "<1 min" : "0 min";
+  if (mins < 60) return `${mins} min`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return m ? `${h}h ${m}m` : `${h}h`;
+};
+
+const ShareIcon = () => (
+  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <circle cx="18" cy="5" r="3" />
+    <circle cx="6" cy="12" r="3" />
+    <circle cx="18" cy="19" r="3" />
+    <path d="M8.6 13.5l6.8 4M15.4 6.5l-6.8 4" />
+  </svg>
+);
+
+const SyncIcon = () => (
+  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M4 6h10M4 12h16M4 18h12" />
+    <path d="M18 4v4M16 6h4" />
+  </svg>
+);
+
 // --- Local (on-device) custom playlist storage ---
 // These playlists are created by the listener and saved ONLY in this
 // browser's localStorage — never sent to, or fetched from, the server.
@@ -665,6 +853,9 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
   // track is currently loaded. No timestamp tracking, no active-line
   // highlighting, no auto-scroll tied to playback position.
   const [showLyrics, setShowLyrics] = useState(false);
+  // Full-screen time-synced lyrics — opens ONLY when the listener picks
+  // "Synced view" inside the lyrics panel; browser full-screen never shows it.
+  const [showSyncLyrics, setShowSyncLyrics] = useState(false);
   const [lyricsLoading, setLyricsLoading] = useState(false);
   // { available, synced: [{time, text}] | null, plain: string | null }
   const [lyricsData, setLyricsData] = useState(null);
@@ -726,6 +917,8 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
   const [newPlaylistName, setNewPlaylistName] = useState("");
   const [addToPlaylistTrack, setAddToPlaylistTrack] = useState(null); // track object currently being saved
   const [addToPlaylistFeedback, setAddToPlaylistFeedback] = useState("");
+  // A playlist that arrived through a share link, waiting for "Save / Cancel".
+  const [importPreview, setImportPreview] = useState(null);
 
   // Liked/favorited tracks — heart icon, saved only on this device.
   const [likedTracks, setLikedTracks] = useState(() => loadLikedTracks());
@@ -818,8 +1011,20 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
       .then((data) => {
         if (data.playlists && data.playlists.length > 0) {
           setPlaylists(data.playlists);
+          let wanted = null;
+          try {
+            const u = new URL(window.location.href);
+            wanted = u.searchParams.get("radio");
+            if (wanted) {
+              u.searchParams.delete("radio");
+              window.history.replaceState(window.history.state, "", `${u.pathname}${u.search}${u.hash}`);
+            }
+          } catch { /* ignore */ }
+          const linked = wanted ? data.playlists.find((p) => p.id === wanted) : null;
+          if (linked) pushToast(`Opened shared playlist "${linked.label}"`, "success");
+          else if (wanted) pushToast("That shared playlist isn't available anymore.", "error");
           setActivePlaylistId((prev) =>
-            data.playlists.some((p) => p.id === prev) ? prev : data.playlists[0].id
+            linked ? linked.id : data.playlists.some((p) => p.id === prev) ? prev : data.playlists[0].id
           );
         }
       })
@@ -1533,6 +1738,51 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
     []
   );
 
+  // ---------- Listening stats ----------
+  // While audio is actually playing, add the wall-clock time to today's
+  // totals (per artist + per track). Wall-clock deltas (not tick counts) keep
+  // it accurate even when the browser throttles timers in a background tab.
+  const statsRef = useRef(null);
+  if (statsRef.current === null) statsRef.current = loadListeningStats();
+  const statsTrackRef = useRef(null);
+  statsTrackRef.current = currentTrack;
+  useEffect(() => {
+    if (!isPlaying) return undefined;
+    const trk = statsTrackRef.current;
+    if (!trk?.id) return undefined;
+    let last = Date.now();
+    const flush = () => {
+      const now = Date.now();
+      const secs = Math.min((now - last) / 1000, 120);
+      last = now;
+      const a = audioRef.current;
+      if (secs > 0 && !(a && a.paused)) {
+        statsRef.current = addListeningSeconds(statsRef.current, trk, secs);
+      }
+    };
+    const timer = setInterval(() => { flush(); persistListeningStats(statsRef.current); }, 10000);
+    return () => {
+      clearInterval(timer);
+      flush();
+      persistListeningStats(statsRef.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isPlaying, currentTrack?.id]);
+
+  // ---------- Shared playlist link (?pl=...) ----------
+  useEffect(() => {
+    let cancelled = false;
+    const code = new URLSearchParams(window.location.search).get("pl");
+    if (!code) return undefined;
+    decodePlaylistShare(code).then((pl) => {
+      if (cancelled) return;
+      if (pl) setImportPreview(pl);
+      else pushToast("This playlist link looks broken or incomplete.", "error", 6000);
+    });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // ---------- Keyboard shortcuts ----------
   // Space: play/pause · ←/→: seek 5s · ↑/↓: volume · N/P: next/prev track.
   // Ignored while typing in any text field, and while modifier keys are
@@ -1633,7 +1883,7 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
     setLyricsLoading(true);
     setLyricsData(null);
 
-    const params = new URLSearchParams({ track: currentTrack.title });
+    const params = new URLSearchParams({ track: currentTrack.title, id: currentTrack.id });
     if (currentTrack.channel) params.set("artist", currentTrack.channel);
     if (currentTrack.duration) params.set("duration", String(Math.round(currentTrack.duration)));
 
@@ -1650,6 +1900,7 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
           synced: data.synced ? parseLRC(data.synced) : [],
           plain: data.plain || null,
           instrumental: !!data.instrumental,
+          source: data.source || null,
         });
       })
       .catch((err) => {
@@ -2366,12 +2617,56 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
     };
   }, [searchQuery]);
 
+  // ---------- Voice search (Web Speech API) ----------
+  const SpeechRec = typeof window !== "undefined" ? (window.SpeechRecognition || window.webkitSpeechRecognition) : null;
+  const voiceSupported = !!SpeechRec;
+  const [listening, setListening] = useState(false);
+  const recogRef = useRef(null);
+
+  const stopVoice = useCallback(() => {
+    try { recogRef.current?.stop(); } catch { /* ignore */ }
+  }, []);
+
+  const startVoice = useCallback(() => {
+    if (!SpeechRec) {
+      pushToast("Voice search isn't supported in this browser. Try Chrome, Edge or Safari.", "error", 5000);
+      return;
+    }
+    if (recogRef.current) { stopVoice(); return; } // second tap = stop
+    const r = new SpeechRec();
+    r.lang = "en-IN"; // understands Hindi songs typed in English letters too
+    r.interimResults = true;
+    r.continuous = false;
+    r.maxAlternatives = 1;
+    r.onstart = () => setListening(true);
+    r.onresult = (e) => {
+      let text = "";
+      for (let i = 0; i < e.results.length; i += 1) text += e.results[i][0].transcript;
+      setSearchQuery(text.trim());
+    };
+    r.onerror = (e) => {
+      if (e.error === "not-allowed" || e.error === "service-not-allowed") {
+        pushToast("Microphone permission is blocked. Allow it in your browser settings to use voice search.", "error", 6000);
+      } else if (e.error === "no-speech") {
+        pushToast("Didn't catch that — tap the mic and try again.", "error", 3500);
+      } else if (e.error === "network") {
+        pushToast("Voice search needs an internet connection.", "error", 4000);
+      }
+    };
+    r.onend = () => { recogRef.current = null; setListening(false); };
+    recogRef.current = r;
+    try { r.start(); } catch { recogRef.current = null; setListening(false); }
+  }, [SpeechRec, pushToast, stopVoice]);
+
+  useEffect(() => () => { try { recogRef.current?.abort(); } catch { /* ignore */ } }, []);
+
   const openSearchPage = () => {
     if (searchPageOpen || window.history.state?.searchPage) return; // onFocus + onClick both fire
     window.history.pushState({ searchPage: true }, "");
     setSearchPageOpen(true);
   };
   const closeSearchPage = () => {
+    stopVoice();
     if (window.history.state?.searchPage) window.history.back();
     else setSearchPageOpen(false);
   };
@@ -2488,8 +2783,13 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
     [likedTracks]
   );
 
+  const likedTracksRef = useRef(likedTracks);
+  likedTracksRef.current = likedTracks;
+
   const toggleLikeTrack = useCallback((track) => {
     if (!track || !track.id) return;
+    // Instagram-style burst, only when a song becomes liked (not on unlike).
+    if (!likedTracksRef.current.some((t) => t.id === track.id)) burstHearts();
     setLikedTracks((prev) => {
       const alreadyLiked = prev.some((t) => t.id === track.id);
       const next = alreadyLiked
@@ -2900,6 +3200,106 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
     reader.readAsText(file);
   };
 
+  // Shared by custom + radio playlist sharing: native share sheet on touch
+  // devices, otherwise copy the link to the clipboard.
+  const deliverShareUrl = async (url, label) => {
+    const touch = window.matchMedia && window.matchMedia("(pointer: coarse)").matches;
+    if (navigator.share && touch) {
+      try {
+        await navigator.share({ title: label, text: `Listen to "${label}" on Raunaknama`, url });
+        return;
+      } catch (err) {
+        if (err?.name === "AbortError") return;
+      }
+    }
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(url);
+      pushToast("Playlist link copied — send it to anyone!", "success");
+    } else {
+      window.prompt("Copy this playlist link:", url);
+    }
+  };
+
+  // Radio playlists live on the server for everyone, so their link is just
+  // a short ?radio=<id> — opening it jumps straight to that playlist.
+  const handleShareRadioPlaylist = async (playlist, e) => {
+    e?.stopPropagation();
+    try {
+      const url = `${window.location.origin}${window.location.pathname}?radio=${encodeURIComponent(playlist.id)}`;
+      await deliverShareUrl(url, playlist.label);
+    } catch (err) {
+      console.warn("Could not share radio playlist:", err);
+      pushToast("Couldn't create the share link.", "error");
+    }
+  };
+
+  // --- Share a custom playlist as a link ---
+  const handleSharePlaylist = async (playlist, e) => {
+    e?.stopPropagation();
+    if (!playlist?.tracks?.length) {
+      pushToast("Add a few songs to this playlist before sharing it.", "error");
+      return;
+    }
+    try {
+      const code = await encodePlaylistShare(playlist);
+      const url = `${window.location.origin}${window.location.pathname}?pl=${code}`;
+      if (url.length > 7500) {
+        pushToast("Big playlist — if the link doesn't open for a friend, use Download backup instead.", "error", 6000);
+      }
+      await deliverShareUrl(url, playlist.label);
+    } catch (err) {
+      console.warn("Could not share playlist:", err);
+      pushToast("Couldn't create the share link.", "error");
+    }
+  };
+
+  const clearShareParam = () => {
+    try {
+      const u = new URL(window.location.href);
+      u.searchParams.delete("pl");
+      window.history.replaceState(window.history.state, "", `${u.pathname}${u.search}${u.hash}`);
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const handleCancelImport = () => {
+    setImportPreview(null);
+    clearShareParam();
+  };
+
+  const handleConfirmImport = () => {
+    if (!importPreview) return;
+    const signature = (tracks) => tracks.map((t) => t.id).sort().join(",");
+    const incomingSig = signature(importPreview.tracks);
+    const existing = customPlaylists.find((p) => signature(p.tracks) === incomingSig);
+    if (existing) {
+      setActivePlaylistId(existing.id);
+      pushToast(`"${existing.label}" is already saved on this device.`, "success");
+    } else {
+      const created = {
+        id: `local:${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        label: importPreview.label,
+        tracks: importPreview.tracks,
+        createdAt: Date.now(),
+      };
+      const next = [...customPlaylists, created];
+      setCustomPlaylists(next);
+      persistLocalPlaylists(next);
+      setActivePlaylistId(created.id);
+      pushToast(`Saved "${created.label}" (${created.tracks.length} songs) to Your playlists.`, "success", 5500);
+    }
+    setImportPreview(null);
+    clearShareParam();
+  };
+
+  const seekTo = (value) => {
+    if (audioRef.current) audioRef.current.currentTime = value;
+    setCurrentTime(value);
+  };
+
+  const weekStats = menuOpen ? computeWeekStats(statsRef.current || { days: {} }) : null;
+
   const isActivePlaylistLocal = activePlaylistId.startsWith("local:");
 
   const showResultsDropdown = searchFocused && (searchQuery.trim().length > 0);
@@ -2914,7 +3314,7 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
       />
       <aside className={`drawer custom-scrollbar ${menuOpen ? "is-open" : ""}`} aria-hidden={!menuOpen}>
         <div className="drawer-head">
-          <h3 className="drawer-title"><span aria-hidden="true">📻</span> Playlists</h3>
+          <h3 className="drawer-title"><Icon name="radio" /> Playlists</h3>
           <button type="button" className="drawer-close" onClick={onCloseMenu} aria-label="Close menu">
             <CloseIcon />
           </button>
@@ -2930,10 +3330,19 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
                     key={p.id}
                     role="tab"
                     aria-selected={p.id === activePlaylistId}
-                    className={`playlist-tab ${p.id === activePlaylistId ? "is-active" : ""}`}
+                    className={`playlist-tab is-local ${p.id === activePlaylistId ? "is-active" : ""}`}
                     onClick={() => setActivePlaylistId(p.id)}
                   >
-                    {p.label}
+                    <span>{p.label}</span>
+                    <span
+                      className="playlist-tab-delete playlist-tab-share"
+                      role="button"
+                      aria-label={`Share playlist ${p.label}`}
+                      title="Share this playlist (link)"
+                      onClick={(e) => handleShareRadioPlaylist(p, e)}
+                    >
+                      <ShareIcon />
+                    </span>
                   </button>
                 ))}
               </div>
@@ -2949,7 +3358,7 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
                 aria-expanded={showQueue}
               >
                 <span className="drawer-section-label queue-drawer-label">
-                  <span aria-hidden="true">🎶</span> Now Playing Queue &middot; {playlist.tracks.length} tracks
+                  <Icon name="listMusic" /> Now Playing Queue &middot; {playlist.tracks.length} tracks
                 </span>
                 <ChevronIcon open={showQueue} />
               </button>
@@ -2964,7 +3373,7 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
                       className={`queue-item ${isSelected ? "is-selected" : ""}`}
                     >
                       <span className="queue-item-index">
-                        {isSelected ? (isPlaying ? "♪" : "❚❚") : idx + 1}
+                        {isSelected ? <Icon name={isPlaying ? "music" : "pause"} size="0.95em" /> : idx + 1}
                       </span>
                       <span className="queue-item-title line-clamp-2">{track.title}</span>
                       <span className="queue-item-actions">
@@ -3088,6 +3497,36 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
             </div>
           </div>
 
+          {weekStats && (
+            <div className="drawer-section listening-card">
+              <p className="drawer-section-label">Your week</p>
+              {weekStats.totalSecs < 30 ? (
+                <p className="playlist-modal-empty">Play some songs — your weekly listening stats will show up here.</p>
+              ) : (
+                <>
+                  <div className="listening-total">
+                    <span className="listening-total-num">{formatListenTime(weekStats.totalSecs)}</span>
+                    <span className="listening-total-sub">listened in the last 7 days</span>
+                  </div>
+                  <div className="listening-bars" aria-hidden="true">
+                    {weekStats.days.map((d, i) => (
+                      <div key={i} className={`listening-bar ${d.isToday ? "is-today" : ""}`}>
+                        <span className="listening-bar-fill" style={{ height: `${Math.max(6, (d.secs / weekStats.maxDay) * 100)}%` }} />
+                        <span className="listening-bar-day">{d.label}</span>
+                      </div>
+                    ))}
+                  </div>
+                  {weekStats.topArtist && (
+                    <p className="listening-line"><span>Top artist</span><strong title={weekStats.topArtist.name}>{weekStats.topArtist.name}</strong></p>
+                  )}
+                  {weekStats.topTrack && (
+                    <p className="listening-line"><span>Most played</span><strong title={weekStats.topTrack.name}>{weekStats.topTrack.name}</strong></p>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+
           <div className="drawer-section local-playlists-block">
             <p className="drawer-section-label">Your playlists</p>
             <div className="playlist-tabs local-playlists-tabs" role="tablist" aria-label="Your custom playlists">
@@ -3101,6 +3540,15 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
                 >
                   <DeviceIcon />
                   <span>{p.label}</span>
+                  <span
+                    className="playlist-tab-delete playlist-tab-share"
+                    role="button"
+                    aria-label={`Share playlist ${p.label}`}
+                    title="Share this playlist (link)"
+                    onClick={(e) => handleSharePlaylist(p, e)}
+                  >
+                    <ShareIcon />
+                  </span>
                   <span
                     className="playlist-tab-delete"
                     role="button"
@@ -3146,6 +3594,8 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
               />
             </div>
           </div>
+
+          <AppDownloads />
         </div>
       </aside>
 
@@ -3167,6 +3617,17 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
           {searchQuery && (
             <button className="search-clear" onClick={clearSearch} aria-label="Clear search">
               <CloseIcon />
+            </button>
+          )}
+          {voiceSupported && (
+            <button
+              type="button"
+              className={`voice-btn ${listening ? "is-listening" : ""}`}
+              onClick={() => { openSearchPage(); startVoice(); }}
+              aria-label="Search by voice"
+              title="Search by voice"
+            >
+              <Icon name="mic" />
             </button>
           )}
           <button
@@ -3199,7 +3660,7 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
                 className="sp-input"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Search any song…"
+                placeholder={listening ? "Listening… say a song or artist" : "Search any song…"}
                 aria-label="Search any song"
                 autoComplete="off"
                 autoCorrect="off"
@@ -3215,6 +3676,18 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
                   aria-label="Clear search"
                 >
                   <CloseIcon />
+                </button>
+              )}
+              {voiceSupported && (
+                <button
+                  type="button"
+                  className={`voice-btn ${listening ? "is-listening" : ""}`}
+                  onClick={startVoice}
+                  aria-label={listening ? "Stop listening" : "Search by voice"}
+                  aria-pressed={listening}
+                  title={listening ? "Stop listening" : "Search by voice"}
+                >
+                  <Icon name="mic" />
                 </button>
               )}
             </div>
@@ -3318,7 +3791,7 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
                 {activeSource === "search" ? "Playing from search" : "Now Playing"}
               </span>
               <h2 className="playlist-title">
-                <span aria-hidden="true">🎙️</span>{" "}
+                <Icon name="mic2" />{" "}
                 {activeSource === "search" ? "Custom pick" : playlist?.playlistTitle}
               </h2>
             </div>
@@ -3393,8 +3866,8 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
             </div>
 
             <div className="track-info">
-              <p className="track-title">{currentTrack.title}</p>
-              <p className="track-meta">
+              <p className="track-title track-swap" key={`t-${currentTrack.id}`}>{currentTrack.title}</p>
+              <p className="track-meta track-swap track-swap--late" key={`m-${currentTrack.id}`}>
                 {activeSource === "search"
                   ? currentTrack.channel || "From search"
                   : `Track ${currentIndex + 1} of ${playlist.tracks.length}`}
@@ -3656,6 +4129,15 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
               </div>
               <button
                 type="button"
+                className="lyrics-sync-btn"
+                disabled={lyricsLoading || !lyricsData?.synced?.length}
+                title={lyricsData?.synced?.length ? "Open full-screen synced lyrics" : "Synced lyrics aren't available for this song"}
+                onClick={() => { setShowLyrics(false); setShowSyncLyrics(true); }}
+              >
+                <SyncIcon /> {lyricsLoading || lyricsData?.synced?.length ? "Synced view" : "No synced lyrics"}
+              </button>
+              <button
+                type="button"
                 className="lyrics-modal-close"
                 aria-label="Close lyrics"
                 onClick={() => setShowLyrics(false)}
@@ -3704,7 +4186,51 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
               )}
             </div>
 
-            <p className="lyrics-modal-footer">Lyrics via lrclib.net</p>
+            <p className="lyrics-modal-footer">{lyricsData?.available && lyricsData.source ? `Lyrics via ${lyricsData.source}` : "Lyrics"}</p>
+          </div>
+        </div>
+      )}
+
+      {showSyncLyrics && currentTrack && (
+        <SyncedLyrics
+          track={currentTrack}
+          lines={lyricsData?.synced || []}
+          loading={lyricsLoading}
+          currentTime={currentTime}
+          duration={duration}
+          isPlaying={isPlaying}
+          onClose={() => setShowSyncLyrics(false)}
+          onSeek={seekTo}
+          onTogglePlay={togglePlayPause}
+          onPrev={handlePrev}
+          onNext={handleNext}
+          onShowPlain={() => { setShowSyncLyrics(false); setShowLyrics(true); }}
+        />
+      )}
+
+      {importPreview && (
+        <div className="playlist-modal-overlay" onMouseDown={handleCancelImport}>
+          <div className="playlist-modal share-import-modal" role="dialog" aria-modal="true" onMouseDown={(e) => e.stopPropagation()}>
+            <h3 className="playlist-modal-title">Playlist shared with you</h3>
+            <p className="playlist-modal-sub">
+              <ShareIcon /> <strong>{importPreview.label}</strong> &middot; {importPreview.tracks.length} songs
+            </p>
+            <ul className="share-import-list">
+              {importPreview.tracks.slice(0, 5).map((t) => (
+                <li key={t.id} className="line-clamp-2">{t.title}</li>
+              ))}
+              {importPreview.tracks.length > 5 && (
+                <li className="share-import-more">+ {importPreview.tracks.length - 5} more</li>
+              )}
+            </ul>
+            <div className="playlist-modal-actions">
+              <button type="button" className="playlist-modal-btn playlist-modal-btn--ghost" onClick={handleCancelImport}>
+                Not now
+              </button>
+              <button type="button" className="playlist-modal-btn playlist-modal-btn--primary" onClick={handleConfirmImport}>
+                Save to my playlists
+              </button>
+            </div>
           </div>
         </div>
       )}

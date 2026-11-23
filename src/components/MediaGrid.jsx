@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import "./MediaGrid.css";
+import Icon from "./Icon";
 
 export default function MediaGrid({ endpoint = "/api/media-grid" }) {
   const [items, setItems] = useState([]);
@@ -61,7 +62,7 @@ export default function MediaGrid({ endpoint = "/api/media-grid" }) {
                 {item.thumbnailUrl ? (
                   <img src={item.thumbnailUrl} alt="" loading="lazy" decoding="async" />
                 ) : (
-                  <div className="mg-art-fallback" aria-hidden="true">♪</div>
+                  <div className="mg-art-fallback" aria-hidden="true"><Icon name="music" /></div>
                 )}
                 {item.duration && <span className="mg-duration">{item.duration}</span>}
                 <button
@@ -70,7 +71,7 @@ export default function MediaGrid({ endpoint = "/api/media-grid" }) {
                   onClick={() => toggle(item)}
                   aria-label={`${state === "playing" ? "Pause" : "Play"} ${item.title}`}
                 >
-                  {state === "loading" ? "…" : state === "playing" ? "❚❚" : "▶"}
+                  {state === "loading" ? "…" : state === "playing" ? <Icon name="pause" /> : <Icon name="play" />}
                 </button>
               </div>
               <div className="mg-meta">

@@ -119,3 +119,5 @@
 @media (prefers-reduced-motion: reduce) {
   .mg-card, .mg-art img, .mg-play { transition: none; }
 }
+.mg-play .ui-icon { width: 20px; height: 20px; }
+.mg-art-fallback .ui-icon { width: 2rem; height: 2rem; }

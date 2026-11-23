@@ -68,10 +68,16 @@
 }
 
 .topbar,
-.stage,
-.foot {
+.stage {
   position: relative;
   z-index: 1;
+}
+
+/* Footer sits BELOW the stage so no card, page or modal opened from the
+   stage can ever be painted over by the tagline / credit. */
+.foot {
+  position: relative;
+  z-index: 0;
 }
 
 /* ---------- Top navigation ---------- */
@@ -134,15 +140,18 @@
   height: 16px;
   flex: 0 0 auto;
   border-radius: 50%;
-  background: repeating-linear-gradient(
-    45deg,
-    var(--stripe-red) 0 6px,
-    var(--stripe-gold) 6px 12px,
-    var(--cream) 12px 18px
+  /* Conic stripes repeat exactly every 120deg, so rotating the whole chip a
+     full turn loops with no jump, giving one smooth, never-ending motion. */
+  background: repeating-conic-gradient(
+    from 0deg,
+    var(--stripe-red) 0deg 40deg,
+    var(--stripe-gold) 40deg 80deg,
+    var(--cream) 80deg 120deg
   );
-  background-size: 200% 200%;
-  animation: pole-scroll 2.4s linear infinite;
-  box-shadow: 0 0 0 1px var(--line);
+  animation: pole-spin 3.2s linear infinite;
+  will-change: transform;
+  backface-visibility: hidden;
+  box-shadow: 0 0 0 1px var(--line), 0 0 10px rgba(226, 171, 63, 0.35);
 }
 
 .brand {
@@ -584,6 +593,15 @@
   }
 }
 
+@keyframes pole-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 @keyframes pole-scroll {
   from {
     background-position: 0 0;
@@ -826,4 +844,41 @@ body {
   .listener-pill {
     display: none;
   }
+}
+
+.foot-tagline .ui-icon { width: 1.1em; height: 1.1em; }
+.foot-heart .ui-icon { width: 1em; height: 1em; }
+.mode-menu-item .ui-icon { width: 1em; height: 1em; }
+
+/* The tagline + credit belong to the default home view only: while search,
+   lyrics, synced lyrics, guide, playlist popups, the menu drawer or the
+   artist page are open, hide the footer completely. */
+body.overlay-open .site-footer,
+body:has(.guide-overlay, .sp-page, .sl-root, .lyrics-modal-overlay, .playlist-modal-overlay, .drawer.is-open, .ap-page, .gate-overlay) .site-footer {
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* ---- Backdrop crossfade: previous photo stays put, new one fades in on top ---- */
+.photo-bg-frame--out { animation: bg-kenburns 14s ease-in-out infinite alternate; opacity: 1; }
+.photo-bg-frame--in { opacity: 0; animation: none; }
+.photo-bg-frame--in.is-ready {
+  animation: bg-crossfade 1.4s cubic-bezier(0.32, 0.72, 0, 1) forwards, bg-kenburns 14s ease-in-out infinite alternate;
+}
+
+/* ---- Track change: title + artist line slide up and fade in ---- */
+.track-swap { animation: track-swap-in 0.55s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+.track-swap--late { animation-delay: 0.08s; }
+@keyframes track-swap-in {
+  from { opacity: 0; transform: translateY(14px); filter: blur(4px); }
+  to { opacity: 1; transform: none; filter: blur(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .track-swap { animation: none; }
+  .photo-bg-frame--in.is-ready { animation: bg-crossfade 0.4s ease forwards; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pole-chip { animation-duration: 12s; }
 }

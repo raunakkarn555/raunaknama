@@ -32,6 +32,9 @@
 [functions."audio-proxy"]
   timeout = 26
 
+[functions."lyrics"]
+  timeout = 26
+
 [functions."search"]
   timeout = 26
 

@@ -321,8 +321,44 @@
   width: 32px; height: 32px; display: grid; place-items: center; border-radius: 50%; cursor: pointer; padding: 0;
   border: 1px solid rgba(244, 232, 216, 0.22); background: rgba(21, 10, 13, 0.72); color: var(--cream, #f4e8d8);
   backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+  transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
 }
-.rc-act:hover { border-color: var(--reco-gold, #e2ab3f); color: var(--reco-gold, #e2ab3f); }
-.rc-act.is-liked { color: var(--reco-red, #b8333a); }
+.rc-act svg { display: block; }
+/* Hover + liked states mirror the player's like / save buttons (gold -> red gradient fill). */
+.rc-act:hover {
+  color: var(--bg, #150a0d); border-color: transparent;
+  background: linear-gradient(160deg, var(--reco-gold, #e2ab3f), var(--reco-red, #b8333a));
+}
+.rc-act:active { transform: scale(0.92); }
+.rc-act:focus-visible { outline: 2px solid var(--reco-gold, #e2ab3f); outline-offset: 2px; }
+.rc-act.is-liked {
+  color: var(--bg, #150a0d); border-color: transparent;
+  background: linear-gradient(160deg, var(--reco-gold, #e2ab3f), var(--reco-red, #b8333a));
+}
 /* Touch screens have no hover: keep the buttons visible. */
 @media (hover: none) { .rc-actions { opacity: 1; } }
+
+/* ---------- Recommended: mood chips ---------- */
+.mood-chips {
+  display: flex; gap: 8px; margin-top: 14px; padding: 2px 2px 6px;
+  overflow-x: auto; scrollbar-width: none; -webkit-overflow-scrolling: touch;
+}
+.mood-chips::-webkit-scrollbar { display: none; }
+.mood-chip {
+  flex: 0 0 auto; display: inline-flex; align-items: center; gap: 6px; padding: 8px 14px;
+  font: inherit; font-weight: 700; font-size: 0.88rem; white-space: nowrap; cursor: pointer;
+  color: var(--cream, #f4e8d8); background: var(--glass, rgba(21, 10, 13, 0.55));
+  border: 1px solid var(--glass-border, rgba(244, 232, 216, 0.14)); border-radius: 999px;
+  backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+  transition: transform 0.15s ease, background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+}
+.mood-chip:hover { border-color: var(--reco-gold, #e2ab3f); transform: translateY(-1px); }
+.mood-chip:active { transform: scale(0.96); }
+.mood-chip:focus-visible { outline: 2px solid var(--reco-gold, #e2ab3f); outline-offset: 2px; }
+.mood-chip.is-active {
+  color: var(--bg, #150a0d); border-color: transparent;
+  background: linear-gradient(160deg, var(--reco-gold, #e2ab3f), var(--reco-red, #b8333a));
+}
+@media (prefers-reduced-motion: reduce) { .mood-chip { transition: none; } }
+.art-fallback .ui-icon { width: 2rem; height: 2rem; }
+.mood-chip .ui-icon { width: 1.1em; height: 1.1em; }

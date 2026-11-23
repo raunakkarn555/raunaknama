@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Player from './components/Player';
 import { RecommendedGrid } from './components/Dashboard';
+import GuideButton from './components/GuideButton';
+import Icon from './components/Icon';
 import { warmStream } from './streamClient';
 import './App.css';
 
@@ -127,7 +129,7 @@ function FooterTagline() {
 
   return (
     <span className="foot-tagline">
-      <span aria-hidden="true">🎧</span>
+      <Icon name="headphones" />
       <span
         key={index}
         className={`foot-tagline-text${visible ? ' foot-tagline-text--visible' : ''}`}
@@ -248,7 +250,7 @@ function ModeMenu({ mode, onChange }) {
                 onClick={() => { onChange(m.id); setOpen(false); }}
               >
                 {m.label}
-                {m.id === mode && <span aria-hidden="true">✓</span>}
+                {m.id === mode && <Icon name="check" />}
               </button>
             </li>
           ))}
@@ -282,7 +284,48 @@ function NavClock() {
   );
 }
 
+// One backdrop photo layer. It preloads its image first and only then fades
+// in, on top of the previous photo (kept underneath), so a track change is a
+// real crossfade instead of a fade-from-dark.
+function BgFrame({ src, incoming }) {
+  const [ready, setReady] = useState(!incoming);
+  useEffect(() => {
+    if (!incoming) return undefined;
+    let alive = true;
+    const img = new Image();
+    const done = () => { if (alive) setReady(true); };
+    img.onload = done;
+    img.onerror = done;
+    img.src = src;
+    if (img.complete) done();
+    return () => { alive = false; };
+  }, [src, incoming]);
+  return (
+    <div
+      className={`photo-bg-frame${incoming ? ' photo-bg-frame--in' : ' photo-bg-frame--out'}${ready ? ' is-ready' : ''}`}
+      style={{ backgroundImage: `url(${src})` }}
+    />
+  );
+}
+
 function App() {
+  // The rotating footer taglines + credit belong to the plain home view only.
+  // Whenever any page, card, popup or drawer is open, flag <body> so the CSS
+  // can hide the whole footer (works even where :has() is unsupported).
+  useEffect(() => {
+    const SEL = '.guide-overlay, .sp-page, .sl-root, .ap-page, .lyrics-modal-overlay, .playlist-modal-overlay, .drawer.is-open, .gate-overlay, [aria-modal="true"]';
+    let raf = 0;
+    const check = () => {
+      raf = 0;
+      document.body.classList.toggle('overlay-open', !!document.body.querySelector(SEL));
+    };
+    const schedule = () => { if (!raf) raf = requestAnimationFrame(check); };
+    const mo = new MutationObserver(schedule);
+    mo.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] });
+    check();
+    return () => { mo.disconnect(); cancelAnimationFrame(raf); document.body.classList.remove('overlay-open'); };
+  }, []);
+
   const [mode, setMode] = useState('default'); // 'default' | 'recommended'
   const [playRequest, setPlayRequest] = useState(null);
   // Like / add-to-playlist for the Recommended cards are handled by the Player
@@ -315,6 +358,12 @@ function App() {
   }, []);
 
   const totalBgPhotos = isMobile ? TOTAL_BG_PHOTOS_MOBILE : TOTAL_BG_PHOTOS;
+
+  // Remember the photo that was showing so the new one can fade in over it.
+  const bgSrc = isMobile ? `/bg/mobile/${bgIndex}.jpg` : `/bg/${bgIndex}.jpg`;
+  const bgHist = useRef({ cur: bgSrc, prev: null });
+  if (bgHist.current.cur !== bgSrc) bgHist.current = { cur: bgSrc, prev: bgHist.current.cur };
+  const bgPrevSrc = bgHist.current.prev;
 
   // If the viewport crosses the mobile breakpoint (resize, rotate, devtools
   // toggle), keep bgIndex valid for whichever photo set is now active
@@ -476,15 +525,8 @@ function App() {
       {/* Full-bleed photo backdrop — swaps to a new frame from /bg on every
           track change, crossfading via the key-based remount below. */}
       <div className="photo-bg" aria-hidden="true">
-        <div
-          key={bgIndex}
-          className="photo-bg-frame"
-          style={{
-            backgroundImage: isMobile
-              ? `url(/bg/mobile/${bgIndex}.jpg)`
-              : `url(/bg/${bgIndex}.jpg)`,
-          }}
-        />
+        {bgPrevSrc && <BgFrame key={`out-${bgPrevSrc}`} src={bgPrevSrc} incoming={false} />}
+        <BgFrame key={`in-${bgSrc}`} src={bgSrc} incoming />
         <span className="photo-bg-scrim" />
         <span className="photo-bg-grain" />
       </div>
@@ -549,6 +591,8 @@ function App() {
         )}
       </main>
 
+      <GuideButton />
+
       <div className="site-footer">
         <footer className="foot">
           <FooterTagline />
@@ -556,7 +600,7 @@ function App() {
 
         <div className="foot-copyright">
           <span className="foot-credit">
-            Crafted with <span className="foot-heart" aria-hidden="true">❤️</span> by{' '}
+            Crafted with <span className="foot-heart" aria-hidden="true"><Icon name="heart" style={{ fill: "currentColor", color: "#e0425a" }} /></span> by{' '}
             <span className="foot-credit-name">Raunak</span>
           </span>
         </div>
