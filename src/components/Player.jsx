@@ -2,6 +2,7 @@ import React, { useEffect, useState, useRef, useCallback, useMemo } from "react"
 import Hls from "hls.js";
 import "./Player.css";
 import { audioEngine } from "../lib/audioEngine";
+import { trackCache } from "../lib/trackCache";
 import useMediaSession from "../hooks/useMediaSession";
 
 // How long we trust a resolved stream URL client-side before re-resolving.
@@ -18,6 +19,7 @@ import {
   beginPlaybackResolve,
   endPlaybackResolve,
   whenPlaybackIdle,
+  isLimitedMode,
 } from "../streamClient";
 import ArtistPage, { ArtistSearchCard } from "./ArtistPage";
 import SyncedLyrics from "./SyncedLyrics";
@@ -782,7 +784,7 @@ function deriveArtistFromResults(query, results) {
 // Put a resolved direct stream into the engine's standby <audio> so it is buffered before the
 // current song ends (HLS needs hls.js and can't be preloaded this way).
 const preloadStandby = (id, data) => {
-  if (!id || !data?.url || data.type === "hls") return;
+  if (!id || !data?.url || data.type === "hls" || data.limited) return;
   audioEngine.preload(id, data.url);
 };
 
@@ -799,6 +801,9 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
     () => initialPlaybackStateRef.current?.currentIndex || 0
   );
   const [isPlaying, setIsPlaying] = useState(false);
+  const ytBlockedRef = useRef(new Set()); // track ids the YouTube-player fallback could not play (embedding disabled etc.)
+  const waitTimerRef = useRef(null);      // stall detector for the normal <audio> path
+  const wantsPlayRef = useRef(false); // latest play intent (read when a stream finishes resolving, so a Play tap during loading is not lost)
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
@@ -959,6 +964,7 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
   const hlsRef = useRef(null);
   const handleAudioErrorRef = useRef(null); // always points at the latest handleAudioError (used by the load watchdog)
   const streamCacheRef = useRef(new Map()); // trackId -> { data: {url,type}, expires }
+  wantsPlayRef.current = isPlaying;
   const loadTokenRef = useRef(0); // guards against a stale resolve landing after a newer track switch
   const autoplayHistoryRef = useRef(new Set()); // recently auto-played track ids, so the "similar songs" chain doesn't immediately repeat itself
   const retriedTrackIdsRef = useRef(new Map()); // track id -> number of forced (cache-bypassing) re-resolves already spent after playback failures
@@ -1406,6 +1412,28 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
     }
   };
 
+  // Plays `trackId` through the YouTube player (see lib/ytAudio.js). Resolves true when it started,
+  // false when it could not (the caller then uses the normal server stream).
+  const startYtForTrack = (trackId, token, { startAt = 0, wantsPlay = true } = {}) => {
+    if (!trackId || ytBlockedRef.current.has(trackId)) return Promise.resolve(false);
+    return audioEngine
+      .playYt(trackId, { volume, startAt, autoplay: wantsPlay })
+      .then(() => {
+        if (token === loadTokenRef.current) {
+          releaseResolveGate();
+          setPlaybackError(null);
+        }
+        return true;
+      })
+      .catch((err) => {
+        if (err?.message === "superseded") return true; // a newer track took over; nothing to fall back to
+        console.warn("YouTube player fallback failed:", err?.message || err);
+        ytBlockedRef.current.add(trackId);
+        audioEngine.leaveYt();
+        return false;
+      });
+  };
+
   // 2b. Prefetch the next track's stream info in the background — both the
   // server-side yt-dlp cache AND our client-side cache get warmed, so by
   // the time the person hits "next" there's zero yt-dlp wait and zero extra
@@ -1440,7 +1468,8 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
       nextTimer = setTimeout(() => {
         resolveStream(nextTrack.id, { background: true })
           .then((data) => { if (!cancelled) preloadStandby(nextTrack.id, data); })
-          .catch(() => {
+          .catch((e) => {
+            if (e?.skipped) return; // limited mode: the YouTube player handles the next song, no server lookup needed
             retryTimer = setTimeout(
               () => resolveStream(nextTrack.id, { forceRefresh: true })
                 .then((data) => { if (!cancelled) preloadStandby(nextTrack.id, data); })
@@ -1480,6 +1509,7 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
   //   - spins up hls.js to play an HLS (.m3u8) stream, which plain <audio
   //     src="..."> cannot do in Chrome/Firefox.
   useEffect(() => {
+    audioEngine.leaveYt(); // new track: go back to the normal <audio> elements first
     const audio = audioRef.current;
     if (!audio) return;
 
@@ -1579,11 +1609,29 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
     // Pause all background fetches until this song is actually playing.
     holdResolveGate();
 
-    resolveStream(currentTrack.id)
+    // A server stream that YouTube cuts after ~850 KB (data.limited) is useless: play the song
+    // through the YouTube player instead (full length, starts in ~1-2 s).
+    const attachOrYt = (data) => {
+      if (data?.limited && !ytBlockedRef.current.has(currentTrack.id)) {
+        startYtForTrack(currentTrack.id, token, { wantsPlay: wantsPlayRef.current }).then((ok) => {
+          if (cancelled || token !== loadTokenRef.current) return;
+          if (!ok) attachStreamAndPlay(data, token, wantsPlayRef.current);
+        });
+        return;
+      }
+      attachStreamAndPlay(data, token, wantsPlayRef.current);
+    };
+
+    const runResolve = () => {
+    // A recently played song may still be in the temporary on-device cache → instant, no network.
+    trackCache.getUrl(currentTrack.id)
+      .then((cachedUrl) => (cachedUrl
+        ? { url: cachedUrl, type: "direct", __backup: true, __cached: true }
+        : resolveStream(currentTrack.id)))
       .then((data) => {
         if (cancelled || token !== loadTokenRef.current) return;
-        setIsTrackLoading(false);
-        attachStreamAndPlay(data, token, wantsPlay);
+        // Keep "Loading…" visible until the audio really has data (canplay / playing event).
+        attachOrYt(data);
       })
       .catch((err) => {
         if (cancelled || token !== loadTokenRef.current) return;
@@ -1600,8 +1648,7 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
           resolveStream(trackId, { forceRefresh: true })
             .then((data) => {
               if (cancelled || token !== loadTokenRef.current) return;
-              setIsTrackLoading(false);
-              attachStreamAndPlay(data, token, wantsPlay);
+              attachOrYt(data);
             })
             .catch((err2) => {
               if (cancelled || token !== loadTokenRef.current) return;
@@ -1617,6 +1664,18 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
         setIsTrackLoading(false);
         handleStreamFailure(err.details || err.message);
       });
+    };
+
+    // After the first "limited" answer from the server, skip the server entirely and go straight
+    // to the YouTube player (fast start). If that fails, the normal path below takes over.
+    if (isLimitedMode() && !ytBlockedRef.current.has(currentTrack.id)) {
+      startYtForTrack(currentTrack.id, token, { wantsPlay: wantsPlayRef.current }).then((ok) => {
+        if (cancelled || token !== loadTokenRef.current) return;
+        if (!ok) runResolve();
+      });
+    } else {
+      runResolve();
+    }
 
     return () => {
       cancelled = true;
@@ -1715,6 +1774,7 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
   };
   useEffect(() => {
     audioEngine.installUnlock();
+    trackCache.init();
     return audioEngine.subscribe((type, e, isActive) => {
       const h = engineHandlersRef.current;
       if (!isActive) {
@@ -1724,7 +1784,20 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
       }
       switch (type) {
         case "play": setIsPlaying(true); break;
-        case "playing": h.playing(); break;
+        case "waiting":
+          setIsTrackLoading(true);
+          // The normal stream stalled (e.g. YouTube cut it off): after a few seconds hand over to
+          // the YouTube player from the same position instead of waiting forever.
+          clearTimeout(waitTimerRef.current);
+          if (!audioEngine.isYt()) {
+            waitTimerRef.current = setTimeout(() => {
+              const a = audioEngine.getActive();
+              if (!audioEngine.isYt() && a && a.readyState < 3 && !a.ended && !document.hidden) h.error();
+            }, 7000);
+          }
+          break;
+        case "canplay": clearTimeout(waitTimerRef.current); setIsTrackLoading(false); break;
+        case "playing": clearTimeout(waitTimerRef.current); h.playing(); break;
         case "pause": if (!e.target.ended) setIsPlaying(false); break;
         case "ended": h.ended(); break;
         case "timeupdate": h.timeUpdate(); break;
@@ -1977,6 +2050,28 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
 
     if (isPlaying) {
       audio.pause();
+      setIsPlaying(false); // also covers "paused while still loading" (no pause event fires then)
+    } else if (currentTrack && (!audio.getAttribute("src") || audio.readyState === 0 && !audio.error && isTrackLoading)) {
+      // The song is still being fetched (no source yet): remember the intent + show loading.
+      // The stream attaches itself and starts playing as soon as it resolves.
+      setIsPlaying(true);
+      setIsTrackLoading(true);
+      if (!isTrackLoading) {
+        // Nothing is in flight (an earlier attempt ended without a stream) → start a fresh load.
+        const token = ++loadTokenRef.current;
+        holdResolveGate();
+        resolveStream(currentTrack.id, { forceRefresh: true })
+          .then((data) => {
+            if (token !== loadTokenRef.current) return;
+            attachStreamAndPlay(data, token, true);
+          })
+          .catch((err) => {
+            if (token !== loadTokenRef.current) return;
+            releaseResolveGate();
+            setIsTrackLoading(false);
+            handleStreamFailure(err.details || err.message);
+          });
+      }
     } else {
       const playPromise = audio.play();
       if (playPromise !== undefined) {
@@ -2200,6 +2295,24 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
     // re-resolve using a different extraction client. That alone recovers
     // a large share of these failures without bothering the listener.
     const trackId = currentTrack?.id;
+    if (trackId && audioRef.current?.src?.startsWith("blob:")) trackCache.remove(trackId);
+
+    // The YouTube player itself failed (e.g. embedding disabled for this video): use the server path.
+    if (audioEngine.isYt()) {
+      audioEngine.leaveYt();
+      if (trackId) ytBlockedRef.current.add(trackId);
+    } else if (trackId && !ytBlockedRef.current.has(trackId)) {
+      // The server stream broke (usually YouTube cutting it after ~850 KB): continue the same
+      // song, from the same position, through the YouTube player.
+      const startAt = audioRef.current?.currentTime || 0;
+      const token = ++loadTokenRef.current;
+      setIsTrackLoading(true);
+      startYtForTrack(trackId, token, { startAt, wantsPlay: wantsPlayRef.current || isPlaying }).then((ok) => {
+        if (token !== loadTokenRef.current) return;
+        if (!ok) handleAudioErrorRef.current?.(); // now blocked -> normal retry ladder
+      });
+      return;
+    }
 
     // Step 1 — a 403 / dead URL (usually YouTube's IP-binding): switch to the
     // backup stream the backend sent along (Piped-proxied) without skipping.
@@ -2264,6 +2377,29 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
     setIsTrackLoading(false);
     setPlaybackError(null);
     setIsPlaying(true);
+
+    // After the song has been playing for a bit, keep a temporary copy on the device so
+    // "Previous"/replay is instant. Old copies are auto-deleted (see lib/trackCache.js).
+    {
+      const a = audioRef.current;
+      const id = currentTrack?.id;
+      const src = a?.src;
+      if (id && src && !src.startsWith("blob:")) {
+        // Only copy a song once the player has ALREADY buffered all of it (proves the stream
+        // is complete and not cut off), so this never adds load to a struggling server.
+        let tries = 0;
+        const check = () => {
+          const cur = audioRef.current;
+          if (currentTrackIdRef.current !== id || !cur || cur.src !== src) return;
+          const d = cur.duration;
+          const buf = cur.buffered;
+          const full = Number.isFinite(d) && d > 0 && buf.length > 0 && buf.end(buf.length - 1) >= d - 1.5 && buf.start(0) <= 1;
+          if (full) { trackCache.save(id, src); return; }
+          if (++tries < 40) setTimeout(check, 6000);
+        };
+        setTimeout(check, 8000);
+      }
+    }
 
     // If this "playing" is the start of a freshly-switched track (see the
     // crossfade-out kickoff in the loading effect), ramp its volume up from
@@ -2433,7 +2569,18 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
     if (!next || audioEngine.standbyFor(next.id)) return;
     const hit = peekStream(next.id);
     if (hit) preloadStandby(next.id, hit);
-    else resolveStream(next.id, { background: true }).then((d) => preloadStandby(next.id, d)).catch(() => {});
+    else {
+      resolveStream(next.id, { background: true })
+        .then((d) => preloadStandby(next.id, d))
+        .catch((e) => {
+          if (e?.skipped) return;
+          // one quiet retry so the next song is really ready before this one ends
+          setTimeout(() => {
+            if (getNextTrack()?.id !== next.id || audioEngine.standbyFor(next.id)) return;
+            resolveStream(next.id, { forceRefresh: true }).then((d) => preloadStandby(next.id, d)).catch(() => {});
+          }, 4000);
+        });
+    }
   };
   const ensureStandbyRef = useRef(null);
   ensureStandbyRef.current = ensureStandby;
@@ -2995,6 +3142,7 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
       autoplay &&
       !repeatOne &&
       !document.hidden &&
+      !audioEngine.isYt() && // YouTube-player mode has no crossfade: let the song finish, "ended" advances
       !earlyAdvanceFiredRef.current &&
       !audioEngine.standbyFor(getNextTrack()?.id) && // standby ready: the gapless swap on "ended" is better
       Number.isFinite(audio.duration) &&
@@ -3919,7 +4067,6 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
                   type="button"
                   className={`orb-play-btn ${isTrackLoading ? "is-loading" : ""}`}
                   onClick={togglePlayPause}
-                  disabled={isTrackLoading}
                   aria-label={isTrackLoading ? "Loading" : isPlaying ? "Pause" : "Play"}
                 >
                   {isTrackLoading ? (

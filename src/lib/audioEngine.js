@@ -14,9 +14,11 @@
 //
 // All four elements are created ONCE, live in <body>, and are never destroyed or recreated.
 
+import { createYtAudio } from "./ytAudio";
+
 const EVENTS = [
   "play", "playing", "pause", "ended", "timeupdate", "loadedmetadata",
-  "durationchange", "error", "seeked", "ratechange",
+  "durationchange", "error", "seeked", "ratechange", "waiting", "canplay",
 ];
 
 // ---- silent WAV (generated once, no giant literal) ----------------------------------------
@@ -38,6 +40,8 @@ const makeSilentWav = (seconds = 1, rate = 8000) => {
 let els = null; // { list: [a, b], fade, keep }
 let activeIdx = 0;
 let standby = { id: null, url: null };
+let yt = null;        // YouTube-player-backed pseudo audio element (fallback when the server stream is cut off)
+let ytActive = false;
 let keepTimer = null;
 let silentUri = null;
 let unlockInstalled = false;
@@ -70,7 +74,7 @@ function build() {
   list.forEach((el) => {
     EVENTS.forEach((type) => {
       el.addEventListener(type, (e) => {
-        const isActive = e.target === els.list[activeIdx];
+        const isActive = !ytActive && e.target === els.list[activeIdx];
         listeners.forEach((fn) => {
           try { fn(type, e, isActive); } catch (err) { console.warn("audioEngine listener error:", err); }
         });
@@ -84,7 +88,39 @@ const ready = () => { build(); return !!els; };
 
 export const audioEngine = {
   init: ready,
-  getActive() { ready(); return els?.list[activeIdx] || null; },
+  getActive() { ready(); if (ytActive && yt) return yt.proxy; return els?.list[activeIdx] || null; },
+  isYt() { return ytActive; },
+
+  // ---- YouTube player fallback ----
+  /** Play `id` through the YouTube player (full song, no server stream needed). */
+  async playYt(id, opts) {
+    if (!ready()) throw new Error("engine not ready");
+    if (!yt) {
+      yt = createYtAudio((type) => {
+        if (!ytActive) return;
+        const ev = { type, target: yt.proxy };
+        listeners.forEach((fn) => { try { fn(type, ev, true); } catch (err) { console.warn("audioEngine listener error:", err); } });
+      });
+    }
+    // silence the normal elements so nothing plays twice
+    const a = els.list[activeIdx];
+    try { a.pause(); a.loop = false; a.removeAttribute("src"); a.load(); } catch { /* ignore */ }
+    this.clearStandby();
+    this.stopKeepAlive();
+    ytActive = true;
+    try {
+      await yt.start(id, opts);
+    } catch (err) {
+      if (err?.message !== "superseded") { ytActive = false; try { yt.stop(); } catch { /* ignore */ } }
+      throw err;
+    }
+  },
+  /** Back to the normal <audio> elements. */
+  leaveYt() {
+    if (!ytActive) return;
+    ytActive = false;
+    try { yt && yt.stop(); } catch { /* ignore */ }
+  },
   getStandby() { ready(); return els?.list[1 - activeIdx] || null; },
   getFade() { ready(); return els?.fade || null; },
 
@@ -125,6 +161,7 @@ export const audioEngine = {
    */
   activateStandby({ volume = 1, loop = false } = {}) {
     if (!ready() || !standby.id) return null;
+    if (ytActive) this.leaveYt();
     const next = this.getStandby();
     const prev = this.getActive();
     if (!next.getAttribute("src")) { standby = { id: null, url: null }; return null; }

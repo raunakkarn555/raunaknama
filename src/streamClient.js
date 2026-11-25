@@ -47,6 +47,15 @@ export function whenPlaybackIdle(maxWaitMs = 30000) {
   });
 }
 
+// --- "Limited" mode ---------------------------------------------------------
+// When the server can only get a stream that YouTube cuts after ~850 KB, every further
+// server lookup is wasted time. The player then switches to the YouTube player for a while
+// and background lookups (prefetch / hover warm) are skipped.
+let limitedUntil = 0;
+export const isLimitedMode = () => Date.now() < limitedUntil;
+export const setLimitedMode = (ms = 15 * 60 * 1000) => { limitedUntil = Date.now() + ms; };
+export const clearLimitedMode = () => { limitedUntil = 0; };
+
 const cache = new Map();    // id -> { data, expires }
 const failedClients = new Map(); // id -> Set of client names whose URL failed in the browser
 const inflight = new Map(); // key -> Promise
@@ -63,6 +72,7 @@ async function fastResolve(id, { fresh = false, exclude = [] } = {}) {
     if (!res.ok) throw new Error(`fast resolve failed (${res.status})`);
     const data = await res.json();
     if (!data?.url) throw new Error("fast resolve returned no url");
+    if (data.limited) setLimitedMode(); else clearLimitedMode();
     return data;
   } finally {
     if (timer) clearTimeout(timer);
@@ -114,6 +124,9 @@ export function fetchStream(id, { forceRefresh = false, background = false, ytdl
   if (background && !forceRefresh) {
     const hit = cache.get(id);
     if (hit && hit.expires > Date.now()) return Promise.resolve(hit.data);
+    if (isLimitedMode()) {
+      return Promise.reject(Object.assign(new Error("skipped (limited mode)"), { skipped: true }));
+    }
     if (resolving > 0) {
       return whenPlaybackIdle().then(() => fetchStream(id, { background: false }));
     }

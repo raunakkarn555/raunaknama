@@ -135,7 +135,7 @@ export const handler = async (event) => {
     // ?json=1 -> same fast resolver, but hands the URL back as JSON so the
     // player can set audio.src itself (and cache it) instead of following a redirect.
     if (wantJson) {
-      const res = json(200, { url, type: hit.type === "hls" ? "hls" : "direct", source: "fast", client, proxied, fallbacks: backups.map((f) => ({ url: f.url, type: "direct", client: f.client })) });
+      const res = json(200, { url, type: hit.type === "hls" ? "hls" : "direct", source: "fast", client, proxied, limited: Boolean(hit.limited), fallbacks: backups.map((f) => ({ url: f.url, type: "direct", client: f.client })) });
       // A forced/fresh lookup must never be served from a browser/CDN cache.
       res.headers["Cache-Control"] = fresh === "1" || fallback === "true" ? "no-store" : "private, max-age=300";
       return res;
