@@ -132,7 +132,7 @@ const COOKIES_PATH = resolveCookiesPath();
 // always fetches the *latest* yt-dlp release on install. Pinning our own client
 // list here means we silently fight yt-dlp's own up-to-date defaults instead of
 // benefiting from them. So: let yt-dlp choose.
-export function authArgs() {
+export function authArgs({ cookies = true } = {}) {
   const args = [
     "--js-runtimes",
     "node",
@@ -157,7 +157,7 @@ export function authArgs() {
     "--extractor-retries", "2",
     "--retries", "3",
   ];
-  if (COOKIES_PATH) {
+  if (cookies && COOKIES_PATH) {
     args.push("--cookies", COOKIES_PATH);
   }
   return args;

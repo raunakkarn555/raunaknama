@@ -11,6 +11,8 @@
 // of ending in "Couldn't play this track — skipping…".
 
 import { getYouTubeCookieHeader } from "./youtubeCookies.mjs";
+import { probeRange, deepRange } from "./googlevideo.mjs";
+import { getPoToken, withPot } from "./poToken.mjs";
 
 let sessionsPromise = null;
 
@@ -60,12 +62,17 @@ function getAnon() {
       const { Innertube, Platform, Log } = mod;
       try { Log.setLevel(Log.Level.NONE); } catch { /* older/newer API */ }
       try { Platform.shim.eval = evalShim; } catch { /* ignore */ }
-      return Innertube.create({
+      const yt = await Innertube.create({
         enable_session_cache: false,
         user_agent: SESSION_USER_AGENT,
         retrieve_player: true,
         generate_session_locally: true,
       });
+      // Warm the visitor-bound PO token in the background (see poToken.mjs).
+      if (process.env.YT_PROBE !== "0") {
+        import("./poToken.mjs").then((m) => m.getPoToken(yt.session?.context?.client?.visitorData)).catch(() => {});
+      }
+      return yt;
     })().catch((err) => {
       anonPromise = null; // allow a later retry
       throw err;
@@ -145,12 +152,16 @@ function userAgentCandidates(Constants, yt, clientName) {
 // direct urls), so it only wasted ~250-650ms per track. URLs are NOT probed
 // server-side any more; the browser (or the audio proxy backup) fetches them.
 // ---------------------------------------------------------------------------
+// MWEB and ANDROID answered "SABR-only" (no direct url) for every track in the
+// logs, so they only wasted requests; they now sit in the last-resort tier.
+// IOS urls are often PO-token gated (CDN 403) -> they are probed below, and
+// ANDROID_VR / TV (no PO token needed) race alongside so a working url wins.
 export const TIERS = [
-  ["MWEB", "IOS", "ANDROID"],           // anonymous, raced; first url wins (~250-700ms)
-  ["TV", "ANDROID_VR"],                 // anonymous last resorts
+  ["IOS", "ANDROID_VR", "TV"],          // anonymous, raced; first PROBED url wins
+  ["MWEB", "ANDROID"],                  // anonymous last resorts
 ];
 export const YTJS_CLIENTS = TIERS.flat();
-const TIER_TIMEOUT_MS = 3500;
+const TIER_TIMEOUT_MS = 5500; // includes the CDN probe
 
 const LOG = process.env.STREAM_LOG !== "0";
 const log = (...a) => { if (LOG) console.log("[youtubei]", ...a); };
@@ -212,7 +223,19 @@ async function pickUrl(yt, info) {
   throw new Error(`decipher failed: ${String(lastErr?.message || lastErr).slice(0, 100)}`);
 }
 
-/** One youtubei.js client -> { url, client, itag, userAgent, ms }. Throws a clean Error on failure. */
+// Which url variant last passed the deep probe: "plain", "pot" (token bound to
+// the session visitorData) or "pot-vid" (bound to the video id). Tried first
+// next time. If the token variants keep failing they are paused for a while,
+// so a broken BotGuard never slows every track down.
+let preferredVariant = "plain";
+let potFailStreak = 0;
+let potPausedUntil = 0;
+const orderVariants = () => {
+  const all = ["plain", "pot", "pot-vid"].filter((v) => v === "plain" || Date.now() > potPausedUntil);
+  return [preferredVariant, ...all.filter((v) => v !== preferredVariant)].filter((v, i, a) => a.indexOf(v) === i && all.includes(v));
+};
+
+/** One youtubei.js client -> { url, client, itag, userAgent, ms, hlsUrl, limited? }. Throws a clean Error on failure. */
 async function runClient(videoId, clientName) {
   const t0 = Date.now();
   const yt = await sessionFor(clientName);
@@ -223,28 +246,58 @@ async function runClient(videoId, clientName) {
     throw new Error(`${status}${info.playability_status.reason ? ` (${info.playability_status.reason})` : ""}`);
   }
   const hit = await pickUrl(yt, info);
-  // No server-side probe: Node's https client is not the browser that will
-  // play this url, and every extra request spends the url's first-use budget.
-  const userAgent = userAgentCandidates(Constants, yt, clientName)[0];
-  return {
-    url: hit.url,
+  const hlsUrl = info?.streaming_data?.hls_manifest_url || null;
+  const base = {
     itag: hit.itag,
     client: `YTJS_${clientName}`,
-    userAgent,
     authed: Boolean(yt.session.logged_in),
-    ms: Date.now() - t0,
+    hlsUrl,
   };
+  const uas = userAgentCandidates(Constants, yt, clientName);
+  if (process.env.YT_PROBE === "0") return { ...base, url: hit.url, userAgent: uas[0], ms: Date.now() - t0 };
+
+  // Verify with the exact request the audio proxy makes. A SHALLOW probe (first
+  // 64 KB) is not enough: urls without a valid PO token pass it and are then cut
+  // after ~850 KB. So also probe 1.5 MB in; when that is refused, retry the same
+  // url WITH a PO token. A url that only passes the shallow probe is returned
+  // flagged `limited` (last resort).
+  const visitorData = yt.session?.context?.client?.visitorData;
+  let limited = null;
+  for (const userAgent of uas) {
+    for (const variant of orderVariants()) {
+      let url = hit.url;
+      if (variant !== "plain") {
+        const token = await getPoToken(variant === "pot" ? visitorData : videoId);
+        if (!token) continue;
+        url = withPot(hit.url, token);
+      }
+      const dr = deepRange(url);
+      // The deep probe (1.5 MB in) already proves the first bytes are served, so
+      // token variants skip the shallow 64 KB probe (one round trip less per
+      // track). The plain variant keeps it: it is what tells a dead url apart
+      // from one that is merely cut after ~850 KB ("limited").
+      if ((variant === "plain" || !dr) && (await probeRange({ url, userAgent, rangeParam: "0-65535" })) === false) continue;
+      const deep = dr ? await probeRange({ url, userAgent, rangeParam: dr }) : null;
+      if (deep !== false) {
+        if (variant !== "plain") { potFailStreak = 0; log(`${videoId} PO token (${variant}) unlocked the full stream`); }
+        preferredVariant = variant;
+        return { ...base, url, userAgent, ms: Date.now() - t0, variant };
+      }
+      if (variant === "plain" && !limited) limited = { ...base, url, userAgent, limited: true };
+    }
+  }
+  if (limited) {
+    if (++potFailStreak >= 3) { potPausedUntil = Date.now() + 10 * 60 * 1000; potFailStreak = 0; log("PO tokens did not help 3x in a row — pausing them for 10 min"); }
+    return { ...limited, ms: Date.now() - t0 };
+  }
+  throw new Error("CDN refused the url (HTTP 403)");
 }
 
 const INIT_TIMEOUT_MS = 20000;
 
 async function raceTier(videoId, names) {
   // Session setup (player JS download, etc.) only happens once per warm
-  // instance. It used to count against each client's 3.5s timeout, so the first
-  // requests after a cold start all "timed out" and fell through to the slow
-  // yt-dlp path. Wait for it here, THEN start the per-client timers.
-  // Only the anonymous session gates the fast path; the cookie session is
-  // awaited lazily by the WEB client alone.
+  // instance. Wait for it here, THEN start the per-client timers.
   await withTimeout(getAnon(), INIT_TIMEOUT_MS, "session init");
   const tierStart = Date.now();
   const attempts = names.map((name) =>
@@ -254,12 +307,32 @@ async function raceTier(videoId, names) {
       throw err;
     })
   );
-  return Promise.any(attempts);
+  // First FULL-length url wins at once; a `limited` one (cut after ~850 KB) only
+  // wins if every other client in the tier failed or is limited too.
+  return new Promise((resolve, reject) => {
+    let pending = attempts.length;
+    let limited = null;
+    let done = false;
+    attempts.forEach((p) =>
+      p
+        .then((h) => {
+          if (done) return;
+          if (!h.limited) { done = true; resolve(h); } else if (!limited) limited = h;
+        }, () => {})
+        .finally(() => {
+          pending -= 1;
+          if (!done && pending === 0) {
+            done = true;
+            if (limited) resolve(limited); else reject(new Error("no client produced a url"));
+          }
+        })
+    );
+  });
 }
 
 /**
  * Tiered resolve. `exclude` = client names (e.g. "YTJS_TV") whose URL just
- * failed in the browser. Resolves { url, client, itag, ms } or null.
+ * failed in the browser. Resolves { url, client, itag, ms, hlsUrl, limited? } or null.
  */
 export async function resolveWithYoutubei(videoId, { exclude = [] } = {}) {
   const skip = new Set(exclude);
@@ -268,7 +341,7 @@ export async function resolveWithYoutubei(videoId, { exclude = [] } = {}) {
     if (!names.length) continue;
     try {
       const hit = await raceTier(videoId, names);
-      log(`${videoId} OK tier${t + 1} ${hit.client} itag=${hit.itag}${hit.authed ? " (cookies)" : ""} in ${hit.ms}ms`);
+      log(`${videoId} OK tier${t + 1} ${hit.client} itag=${hit.itag}${hit.variant && hit.variant !== "plain" ? ` +${hit.variant}` : ""}${hit.limited ? " (LIMITED: cut after ~850KB)" : ""}${hit.authed ? " (cookies)" : ""} in ${hit.ms}ms`);
       return hit;
     } catch (err) {
       log(`${videoId} tier${t + 1} (${names.join("+")}) gave nothing`);

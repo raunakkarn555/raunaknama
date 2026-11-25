@@ -79,11 +79,21 @@ function originOf(event) {
 // Direct googlevideo url first (the browser plays it as-is); the signed
 // audio-proxy url rides along as the first backup. AUDIO_PROXY_CLIENTS can
 // still force the proxy to be primary for specific clients.
-function playable(hit, origin) {
+function playable(hit, origin, videoId) {
   const proxyUrl = () => {
-    const token = createProxyToken({ url: hit.url, userAgent: hit.userAgent });
+    const token = createProxyToken({ url: hit.url, userAgent: hit.userAgent, videoId, client: hit.client });
     return `${origin}/.netlify/functions/audio-proxy?t=${token}`;
   };
+  // HLS via audio-proxy (rewritten audio-only playlist); the plain url rides along as backup.
+  if (hit.type === "hls" && hit.hlsProxy) {
+    const t = createProxyToken({ url: hit.url, userAgent: hit.userAgent, videoId, client: hit.client, kind: "hls", ttlMs: 3 * 60 * 60 * 1000 });
+    const alt = hit.alt && isGooglevideo(hit.alt.url)
+      ? { url: `${origin}/.netlify/functions/audio-proxy?t=${createProxyToken({ url: hit.alt.url, userAgent: hit.alt.userAgent, videoId, client: hit.alt.client })}`, client: `${hit.alt.client}+PROXY` }
+      : null;
+    return { url: `${origin}/.netlify/functions/audio-proxy?t=${t}`, proxied: true, proxyBackup: alt };
+  }
+  // HLS manifests (yt-dlp last resort) are played by hls.js directly.
+  if (hit.type === "hls") return { url: hit.url, proxied: false, proxyBackup: null };
   if (needsProxy(hit.client)) return { url: proxyUrl(), proxied: true, proxyBackup: null };
   const canProxy = origin && hit.userAgent !== undefined && isGooglevideo(hit.url);
   return {
@@ -119,13 +129,13 @@ export const handler = async (event) => {
     });
     if (!hit) return json(404, { error: "No audio format available for this track" });
     const { client, fallbacks = [] } = hit;
-    const { url, proxied, proxyBackup } = playable(hit, originOf(event));
+    const { url, proxied, proxyBackup } = playable(hit, originOf(event), String(token || ""));
     const backups = [...(proxyBackup ? [proxyBackup] : []), ...fallbacks];
 
     // ?json=1 -> same fast resolver, but hands the URL back as JSON so the
     // player can set audio.src itself (and cache it) instead of following a redirect.
     if (wantJson) {
-      const res = json(200, { url, type: "direct", source: "fast", client, proxied, fallbacks: backups.map((f) => ({ url: f.url, type: "direct", client: f.client })) });
+      const res = json(200, { url, type: hit.type === "hls" ? "hls" : "direct", source: "fast", client, proxied, fallbacks: backups.map((f) => ({ url: f.url, type: "direct", client: f.client })) });
       // A forced/fresh lookup must never be served from a browser/CDN cache.
       res.headers["Cache-Control"] = fresh === "1" || fallback === "true" ? "no-store" : "private, max-age=300";
       return res;

@@ -16,6 +16,11 @@
   # the function.
   included_files = ["netlify/functions/_shared/bin/**"]
 
+  # jsdom + bgutils-js (PO-token minting) are loaded with a dynamic import() at
+  # runtime. Bundling jsdom makes esbuild warn about xhr-sync-worker.js, so they
+  # are shipped as real node_modules instead of being bundled.
+  external_node_modules = ["jsdom", "bgutils-js"]
+
 # Netlify's synchronous function timeout defaults to 10s, and even on a paid
 # Pro plan the hard platform max is 26s (Starter/free plans stay capped at
 # 10s no matter what's set here). yt-dlp resolving a format from a
@@ -39,6 +44,9 @@
   timeout = 26
 
 [functions."artist-songs"]
+  timeout = 26
+
+[functions."music-search"]
   timeout = 26
 
 [functions."playlist"]

@@ -49,36 +49,43 @@ export function ArtistSearchCard({ artist, onOpen }) {
   );
 }
 
+const SOURCES = [
+  { id: "music", label: "Songs" },
+  { id: "youtube", label: "From YouTube" },
+];
+
 /**
- * Full-screen artist page: photo, about, and an endless list of songs that
- * keeps loading as you scroll. `renderTrack` is the host's song card so
- * play / like / add-to-playlist behave exactly like in search.
+ * One endless, scroll-loading list of an artist's tracks from one source:
+ *   music   -> YouTube Music songs (audio tracks, like the Recommended cards)
+ *   youtube -> YouTube videos for the artist
+ * Mounted with `key={source}`, so switching chips starts a clean list.
  */
-export default function ArtistPage({ artist, onClose, renderTrack, onPlay }) {
+function ArtistTracks({ name, source, rootRef, renderTrack, onFirst }) {
   const [songs, setSongs] = useState([]);
   const [status, setStatus] = useState("idle"); // idle | loading | error | end
-  const [aboutOpen, setAboutOpen] = useState(false);
 
   const pageRef = useRef(0);
   const busyRef = useRef(false);
   const seenRef = useRef(new Set());
-  const emptyRunRef = useRef(0);
-  const bodyRef = useRef(null);
+  const aliveRef = useRef(true);
   const sentinelRef = useRef(null);
-  const nameRef = useRef(artist.name);
+
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => { aliveRef.current = false; };
+  }, []);
 
   const loadMore = useCallback(async () => {
     if (busyRef.current) return;
     busyRef.current = true;
     setStatus("loading");
-    const name = nameRef.current;
     try {
       // Skip over pages that add nothing new (all duplicates / filtered out).
       for (let tries = 0; tries < 3; tries++) {
         const page = pageRef.current;
-        const res = await fetch(`${API_BASE}/api/artist-songs?name=${encodeURIComponent(name)}&page=${page}`);
+        const res = await fetch(`${API_BASE}/api/artist-songs?name=${encodeURIComponent(name)}&page=${page}&source=${source}`);
         const data = await res.json().catch(() => ({}));
-        if (nameRef.current !== name) return; // artist changed while loading
+        if (!aliveRef.current) return; // tab switched / page closed while loading
         if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
 
         pageRef.current = page + 1;
@@ -86,11 +93,8 @@ export default function ArtistPage({ artist, onClose, renderTrack, onPlay }) {
         fresh.forEach((t) => seenRef.current.add(t.id));
 
         if (fresh.length) {
-          emptyRunRef.current = 0;
           setSongs((prev) => prev.concat(fresh));
           if (page === 0) fresh.slice(0, 3).forEach((t, i) => setTimeout(() => warmStream(t.id), i * 300));
-        } else {
-          emptyRunRef.current += 1;
         }
 
         if (!data.hasMore) {
@@ -104,21 +108,27 @@ export default function ArtistPage({ artist, onClose, renderTrack, onPlay }) {
       }
       setStatus("idle");
     } catch (err) {
+      if (!aliveRef.current) return;
       console.warn("Artist songs error:", err.message);
       setStatus("error");
     } finally {
       busyRef.current = false;
     }
-  }, []);
+  }, [name, source]);
 
   // First page immediately.
   useEffect(() => {
     loadMore();
   }, [loadMore]);
 
+  // Tell the page which track its big Play button should start.
+  useEffect(() => {
+    if (songs[0]) onFirst?.(songs[0]);
+  }, [songs, onFirst]);
+
   // Infinite scroll: load the next page when the sentinel nears the viewport.
   useEffect(() => {
-    const root = bodyRef.current;
+    const root = rootRef.current;
     const el = sentinelRef.current;
     if (!root || !el || status !== "idle") return undefined;
     const io = new IntersectionObserver(
@@ -129,7 +139,50 @@ export default function ArtistPage({ artist, onClose, renderTrack, onPlay }) {
     );
     io.observe(el);
     return () => io.disconnect();
-  }, [status, songs.length, loadMore]);
+  }, [status, songs.length, loadMore, rootRef]);
+
+  return (
+    <>
+      <div className="sp-grid">{songs.map((t) => renderTrack(t))}</div>
+
+      {status === "loading" && (
+        <div className="sp-grid ap-skels" aria-hidden="true">
+          {Array.from({ length: songs.length ? 4 : 8 }, (_, i) => <div key={i} className="sp-card sp-skel" />)}
+        </div>
+      )}
+      {status === "error" && (
+        <p className="ap-note">
+          Couldn’t load songs right now.{" "}
+          <button type="button" className="ap-more" onClick={loadMore}>Try again</button>
+        </p>
+      )}
+      {status === "end" && songs.length > 0 && <p className="ap-note">That’s everything for now.</p>}
+      {status === "end" && songs.length === 0 && (
+        <p className="ap-note">
+          {source === "music" ? "No songs found for this artist." : "No YouTube videos found for this artist."}
+        </p>
+      )}
+
+      <div ref={sentinelRef} className="ap-sentinel" aria-hidden="true" />
+    </>
+  );
+}
+
+/**
+ * Full-screen artist page: photo, about, and an endless list of tracks that
+ * keeps loading as you scroll. Two chips pick the source: "Songs" (music
+ * tracks, no videos) or "From YouTube" (YouTube recommendations).
+ * `renderTrack` is the host's song card so play / like / add-to-playlist
+ * behave exactly like in search.
+ */
+export default function ArtistPage({ artist, onClose, renderTrack, onPlay }) {
+  const [source, setSource] = useState("music");
+  const [first, setFirst] = useState({ source: "music", track: null });
+  const [aboutOpen, setAboutOpen] = useState(false);
+  const bodyRef = useRef(null);
+
+  const onFirst = useCallback((track) => setFirst({ source, track }), [source]);
+  const playTrack = first.source === source ? first.track : null;
 
   const about = artist.about || "";
   const longAbout = about.length > 280;
@@ -157,8 +210,8 @@ export default function ArtistPage({ artist, onClose, renderTrack, onPlay }) {
               <button
                 type="button"
                 className="ap-play"
-                disabled={!songs.length}
-                onClick={() => songs[0] && onPlay?.(songs[0])}
+                disabled={!playTrack}
+                onClick={() => playTrack && onPlay?.(playTrack)}
               >
                 <Icon name="play" size="0.9em" /> Play
               </button>
@@ -183,24 +236,29 @@ export default function ArtistPage({ artist, onClose, renderTrack, onPlay }) {
           </section>
         )}
 
-        <h2 className="sp-heading">Songs</h2>
-        <div className="sp-grid">{songs.map((t) => renderTrack(t))}</div>
+        <div className="ap-tabs" role="tablist" aria-label="Choose where the tracks come from">
+          {SOURCES.map((o) => (
+            <button
+              key={o.id}
+              type="button"
+              role="tab"
+              aria-selected={source === o.id}
+              className={`ap-tab ${source === o.id ? "is-active" : ""}`}
+              onClick={() => setSource(o.id)}
+            >
+              {o.label}
+            </button>
+          ))}
+        </div>
 
-        {status === "loading" && (
-          <div className="sp-grid ap-skels" aria-hidden="true">
-            {Array.from({ length: songs.length ? 4 : 8 }, (_, i) => <div key={i} className="sp-card sp-skel" />)}
-          </div>
-        )}
-        {status === "error" && (
-          <p className="ap-note">
-            Couldn’t load songs right now.{" "}
-            <button type="button" className="ap-more" onClick={loadMore}>Try again</button>
-          </p>
-        )}
-        {status === "end" && songs.length > 0 && <p className="ap-note">That’s everything for now.</p>}
-        {status === "end" && songs.length === 0 && <p className="ap-note">No songs found for this artist.</p>}
-
-        <div ref={sentinelRef} className="ap-sentinel" aria-hidden="true" />
+        <ArtistTracks
+          key={source}
+          name={artist.name}
+          source={source}
+          rootRef={bodyRef}
+          renderTrack={renderTrack}
+          onFirst={onFirst}
+        />
       </div>
     </div>
   );

@@ -1,6 +1,6 @@
 import https from "node:https";
 import http from "node:http";
-import { ipFamilyOf, requestUpstream } from "./googlevideo.mjs";
+import { ipFamilyOf, requestUpstream, probeRange, deepRange } from "./googlevideo.mjs";
 
 // Native-https helper: POST a player request, pick the highest-bitrate audio
 // format, return its URL. No third-party dependencies.
@@ -186,17 +186,13 @@ export function pickBestAudioUrl(data) {
  * A timeout/network hiccup counts as "unknown" => treated as usable.
  */
 export async function probeAudioUrl(url, userAgent, timeoutMs = VALIDATE_TIMEOUT_MS) {
-  // Uses the SAME request the audio proxy makes (shared requestUpstream, same
-  // IP family, same `range=` URL-param form), so "ok" here really means
-  // "the proxy can play it". It used to send a bounded `Range:` header that
-  // passed while the proxy's different request got 403 — a false positive.
-  try {
-    const res = await requestUpstream({ url, userAgent, rangeParam: "0-65535", timeoutMs });
-    res.destroy(); // never download the body
-    return res.statusCode >= 200 && res.statusCode < 400;
-  } catch {
-    return true; // timeout / network hiccup = unknown, treated as usable
-  }
+  // Same request the audio proxy makes. Shallow (first 64 KB) AND deep (1.5 MB
+  // in): urls that are cut after ~850 KB (no PO token) must not count as playable.
+  const shallow = await probeRange({ url, userAgent, rangeParam: "0-65535", timeoutMs });
+  if (shallow === false) return false;
+  const dr = deepRange(url);
+  if (!dr) return true;
+  return (await probeRange({ url, userAgent, rangeParam: dr, timeoutMs })) !== false;
 }
 
 async function askClient(videoId, c) {
@@ -216,7 +212,10 @@ async function askClient(videoId, c) {
   if (status && status !== "OK") return null; // LOGIN_REQUIRED / UNPLAYABLE for this client
   const url = pickBestAudioUrl(data);
   if (!url) return null;
-  return url; // not probed server-side (see youtubeiResolver.mjs)
+  // Probe with the exact request the audio proxy makes: a PO-token-gated url
+  // (403) is dropped here so the next client is tried, instead of the browser
+  // finding out later and walking a slow retry chain.
+  return (await probeAudioUrl(url, c.userAgent)) ? url : null;
 }
 
 /**

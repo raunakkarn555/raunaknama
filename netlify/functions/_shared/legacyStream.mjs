@@ -97,17 +97,30 @@ export const handler = async (event) => {
   // yt-dlp's own PO-token guide currently recommends as the fallback when
   // the default clients are having trouble, and one that benefits most from
   // the cookies we already attach via authArgs().
-  const args = [
+  // ROOT CAUSE of "Requested format is not available": the frontend always
+  // calls this with retry=1, and the retry branch forced
+  // `player_client=mweb,tv_embedded`. mweb now only answers SABR (no direct
+  // urls without a PO token) and tv_embedded is dead, so yt-dlp saw ZERO audio
+  // formats on every video. No client override any more: attempt 1 uses
+  // yt-dlp's own up-to-date default clients (with cookies). If that still has
+  // no format, attempt 2 retries WITHOUT cookies on clients that need no PO
+  // token (android_vr, web_safari -> HLS, tv).
+  const buildArgs = (second) => [
     "-f", FORMAT_SELECTOR,
     "-j", // dump-json: gives us both the resolved URL and its protocol/ext
     "--no-warnings",
-    ...(isRetry ? ["--extractor-args", "youtube:player_client=mweb,tv_embedded"] : []),
-    ...authArgs(),
+    ...(second ? ["--extractor-args", "youtube:player_client=android_vr,web_safari,tv"] : []),
+    ...authArgs({ cookies: !second }),
     videoUrl,
   ];
+  const args = buildArgs(false);
 
   try {
-    const { code, stdoutData, stderrData } = await spawnYtDlp(args);
+    let { code, stdoutData, stderrData } = await spawnYtDlp(args);
+    if ((code !== 0 || !stdoutData.trim()) && /Requested format is not available|No video formats|Sign in to confirm|page needs to be reloaded/i.test(stderrData)) {
+      console.warn(`[ytdlp] ${id}: attempt 1 gave no format, retrying without cookies on PO-token-free clients`);
+      ({ code, stdoutData, stderrData } = await spawnYtDlp(buildArgs(true)));
+    }
 
     if (code !== 0 || !stdoutData.trim()) {
       console.error(`Error resolving audio stream for track ${id}:`, stderrData);
@@ -145,6 +158,8 @@ export const handler = async (event) => {
       url: info.url,
       type: isHlsFormat(info) ? "hls" : "direct",
       ext: info.ext || null,
+      // UA yt-dlp used; audio-proxy replays it when it streams this url.
+      userAgent: info.http_headers?.["User-Agent"] || null,
     };
 
     // Cache resolved stream info for 2 hours (YouTube CDN URLs last ~6h).

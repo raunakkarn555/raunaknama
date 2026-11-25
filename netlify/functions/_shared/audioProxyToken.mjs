@@ -28,8 +28,9 @@ function secret() {
 
 const sign = (data) => crypto.createHmac("sha256", secret()).update(data).digest("base64url");
 
-export function createProxyToken({ url, userAgent, ttlMs = 6 * 60 * 60 * 1000 }) {
-  const body = b64u(JSON.stringify({ u: url, ua: userAgent || "", exp: Date.now() + ttlMs }));
+export function createProxyToken({ url, userAgent, videoId, client, kind, ttlMs = 6 * 60 * 60 * 1000 }) {
+  // `v`/`c` let audio-proxy re-resolve with another client if the CDN refuses the url.
+  const body = b64u(JSON.stringify({ u: url, ua: userAgent || "", v: videoId || "", c: client || "", k: kind || "", exp: Date.now() + ttlMs }));
   return `${body}.${sign(body)}`;
 }
 
@@ -49,7 +50,7 @@ export function verifyProxyToken(token) {
     throw fail(400, "Unreadable token");
   }
   if (!data?.u || !(data.exp > Date.now())) throw fail(410, "Token expired");
-  return { url: data.u, userAgent: data.ua || "" };
+  return { url: data.u, userAgent: data.ua || "", videoId: data.v || "", client: data.c || "", kind: data.k || "" };
 }
 
 // Which resolver clients get the audio proxy as their PRIMARY url. Default: none
@@ -58,7 +59,12 @@ export function verifyProxyToken(token) {
 // direct url is refused (e.g. IP mismatch in production). Set
 // AUDIO_PROXY_CLIENTS=* (or a comma list such as YTJS_IOS,YTJS_MWEB) to make the
 // proxy primary again.
-const RAW = process.env.AUDIO_PROXY_CLIENTS ?? "";
+// Default is now "*": googlevideo urls are bound to the IP (and UA) that asked
+// for them, so in production (Netlify's IP != the listener's IP) a direct url
+// ALWAYS 403s in the browser first and only then falls back to the proxy —
+// that wasted round trip was a big part of the slow start. Set
+// AUDIO_PROXY_CLIENTS="" in the environment to restore direct-first.
+const RAW = process.env.AUDIO_PROXY_CLIENTS ?? "*";
 const PROXY_CLIENTS = new Set(RAW.split(",").map((s) => s.trim()).filter(Boolean));
 export const needsProxy = (client) =>
   client !== "PIPED" && (PROXY_CLIENTS.has("*") || PROXY_CLIENTS.has(client));

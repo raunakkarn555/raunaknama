@@ -166,12 +166,16 @@ const BackIcon = () => (
 
 // Cover art with a graceful fallback chain (hq720 -> hqdefault -> placeholder).
 const COVER_SIZES = ["hq720", "hqdefault", "mqdefault"];
-function SearchCover({ id }) {
+function SearchCover({ id, src }) {
+  // `src` = square album art of a music "song" result; the YouTube video
+  // thumbnails stay as the fallback chain behind it.
   const [step, setStep] = useState(0);
-  if (step >= COVER_SIZES.length) return <span className="sp-cover-fallback" aria-hidden="true"><Icon name="music" /></span>;
+  const sources = src ? [src, ...COVER_SIZES.map((z) => `https://i.ytimg.com/vi/${id}/${z}.jpg`)] : null;
+  const total = sources ? sources.length : COVER_SIZES.length;
+  if (step >= total) return <span className="sp-cover-fallback" aria-hidden="true"><Icon name="music" /></span>;
   return (
     <img
-      src={`https://i.ytimg.com/vi/${id}/${COVER_SIZES[step]}.jpg`}
+      src={sources ? sources[step] : `https://i.ytimg.com/vi/${id}/${COVER_SIZES[step]}.jpg`}
       alt=""
       loading="lazy"
       decoding="async"
@@ -1278,8 +1282,10 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
           const ranked = rankSearchResults(results, searchQuery);
           setSearchResults(ranked);
           // Pre-resolve the first few results so tapping one starts right away.
-          ranked.slice(0, 3).forEach((t, i) => {
-            if (t?.id) setTimeout(() => warmStream(t.id), i * 300);
+          // (the Songs section warms its own top results; keep this to one so
+          // the track you actually tap isn't competing with a pile of resolves)
+          ranked.slice(0, 1).forEach((t) => {
+            if (t?.id) setTimeout(() => warmStream(t.id), 300);
           });
         })
         .catch((err) => {
@@ -1887,8 +1893,13 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
     if (currentTrack.channel) params.set("artist", currentTrack.channel);
     if (currentTrack.duration) params.set("duration", String(Math.round(currentTrack.duration)));
 
-    fetch(`${API_BASE}/api/lyrics?${params.toString()}`)
-      .then((res) => res.json())
+    // Lyrics are secondary: let the song's own stream resolve take the network
+    // first (gate in streamClient.js), but never wait more than 2.5 s for it.
+    whenPlaybackIdle(2500)
+      .then(() => {
+        if (lyricsRequestIdRef.current !== requestId) return null; // already superseded
+        return fetch(`${API_BASE}/api/lyrics?${params.toString()}`).then((res) => res.json());
+      })
       .then((data) => {
         if (lyricsRequestIdRef.current !== requestId) return; // stale — a newer track has since loaded
         if (!data || !data.available) {
@@ -2617,6 +2628,39 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
     };
   }, [searchQuery]);
 
+  // YouTube Music "Songs" for the query (audio tracks with real artist / album
+  // data — not videos), fetched in parallel with the YouTube search above. The
+  // search page shows these first and keeps the YouTube results below them.
+  const [musicResults, setMusicResults] = useState([]);
+  const [isMusicSearching, setIsMusicSearching] = useState(false);
+  useEffect(() => {
+    const q = searchQuery.trim();
+    setMusicResults([]);
+    if (!q) {
+      setIsMusicSearching(false);
+      return undefined;
+    }
+    setIsMusicSearching(true);
+    let cancelled = false;
+    const handle = setTimeout(() => {
+      fetch(`${API_BASE}/api/music-search?q=${encodeURIComponent(q)}`)
+        .then((res) => (res.ok ? res.json() : { songs: [] }))
+        .then((data) => {
+          if (cancelled) return;
+          const songs = (data?.songs || []).filter((t) => t?.id);
+          setMusicResults(songs);
+          // Pre-resolve the top songs so tapping one starts right away.
+          songs.slice(0, 3).forEach((t, i) => setTimeout(() => warmStream(t.id), i * 300));
+        })
+        .catch(() => { if (!cancelled) setMusicResults([]); })
+        .finally(() => { if (!cancelled) setIsMusicSearching(false); });
+    }, 450);
+    return () => {
+      cancelled = true;
+      clearTimeout(handle);
+    };
+  }, [searchQuery]);
+
   // ---------- Voice search (Web Speech API) ----------
   const SpeechRec = typeof window !== "undefined" ? (window.SpeechRecognition || window.webkitSpeechRecognition) : null;
   const voiceSupported = !!SpeechRec;
@@ -2709,6 +2753,15 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [artistPage]);
 
+  // Search page lists: music songs + YouTube videos (minus any video that is
+  // already shown as a song).
+  const searchBusy = isSearching || isMusicSearching;
+  const youtubeResults = useMemo(() => {
+    if (!musicResults.length) return searchResults;
+    const have = new Set(musicResults.map((t) => t.id));
+    return searchResults.filter((t) => !have.has(t.id));
+  }, [searchResults, musicResults]);
+
   const fmtDur = (d) => (typeof d === "number" && d > 0 ? formatTime(d) : typeof d === "string" ? d : "");
 
   const renderSearchCard = (track, hero = false) => {
@@ -2729,7 +2782,7 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
           aria-label={`Play ${track.title}`}
         >
           <span className="sp-cover">
-            <SearchCover id={track.id} />
+            <SearchCover id={track.id} src={track.thumbnailUrl} />
             <span className="sp-play">{playing ? <PauseIcon /> : <PlayIcon />}</span>
           </span>
           <span className="sp-meta">
@@ -3709,29 +3762,59 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
               </>
             )}
 
-            {searchQuery.trim() && isSearching && (
+            {searchQuery.trim() && searchBusy && (
               <div className="sp-grid" aria-hidden="true">
                 {Array.from({ length: 8 }, (_, i) => <div key={i} className="sp-card sp-skel" />)}
               </div>
             )}
 
-            {searchQuery.trim() && !isSearching && searchResults.length === 0 && (
+            {searchQuery.trim() && !searchBusy && musicResults.length === 0 && searchResults.length === 0 && (
               <div className="sp-empty">
                 <h2 className="sp-empty-title">No results</h2>
                 <p className="sp-empty-sub">Nothing found for “{searchQuery}”. Try another spelling.</p>
               </div>
             )}
 
-            {searchQuery.trim() && !isSearching && searchResults.length > 0 && (
+            {/* Music songs first (audio tracks, like the Recommended cards)… */}
+            {searchQuery.trim() && !searchBusy && musicResults.length > 0 && (
               <>
                 <h2 className="sp-heading">Top result</h2>
-                {renderSearchCard(searchResults[0], true)}
-                {searchResults.length > 1 && (
+                {renderSearchCard(musicResults[0], true)}
+                {musicResults.length > 1 && (
                   <>
                     <h2 className="sp-heading">Songs</h2>
                     <div className="sp-grid">
-                      {searchResults.slice(1).map((t) => renderSearchCard(t))}
+                      {musicResults.slice(1, 13).map((t) => renderSearchCard(t))}
                     </div>
+                  </>
+                )}
+              </>
+            )}
+
+            {/* …then the YouTube videos, exactly as they were. With no music
+                results (music search down / nothing found) this is the original
+                "Top result" + "Songs" layout. */}
+            {searchQuery.trim() && !searchBusy && youtubeResults.length > 0 && (
+              <>
+                {musicResults.length > 0 ? (
+                  <>
+                    <h2 className="sp-heading">From YouTube</h2>
+                    <div className="sp-grid">
+                      {youtubeResults.map((t) => renderSearchCard(t))}
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <h2 className="sp-heading">Top result</h2>
+                    {renderSearchCard(youtubeResults[0], true)}
+                    {youtubeResults.length > 1 && (
+                      <>
+                        <h2 className="sp-heading">Songs</h2>
+                        <div className="sp-grid">
+                          {youtubeResults.slice(1).map((t) => renderSearchCard(t))}
+                        </div>
+                      </>
+                    )}
                   </>
                 )}
               </>

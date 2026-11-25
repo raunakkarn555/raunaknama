@@ -40,7 +40,13 @@ async function fetchJson(url, options = {}, ms = SOURCE_TIMEOUT_MS) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), ms);
   try {
-    const res = await fetch(url, { ...options, signal: ctrl.signal });
+    let res;
+    try {
+      res = await fetch(url, { ...options, signal: ctrl.signal });
+    } catch (err) {
+      if (err?.name === "AbortError" || ctrl.signal.aborted) throw new Error(`${new URL(url).host} timeout`);
+      throw err;
+    }
     if (res.status === 404) return null;
     if (!res.ok) throw new Error(`${new URL(url).host} responded ${res.status}`);
     const text = await res.text();
@@ -140,6 +146,7 @@ function htmlToText(html) {
     .trim();
 }
 
+const isTimeout = (err) => /timeout|timed out|aborted/i.test(String(err?.message || err));
 const hasContent = (r) => r && ((r.synced && r.synced.trim()) || (r.plain && r.plain.trim()));
 
 // ---------- source 1: lrclib.net ----------
@@ -190,7 +197,7 @@ async function fromLrclib({ track, artist, duration }) {
       const r = wrap(await attempt());
       if (hasContent(r)) return r;
     } catch (err) {
-      console.warn("[lyrics] lrclib attempt failed:", err.message);
+      if (!isTimeout(err)) console.warn("[lyrics] lrclib attempt failed:", err.message);
     }
   }
   return null;
@@ -242,7 +249,7 @@ async function fromSaavn({ track, artist }) {
         if (text && text.length > 40) return { synced: null, plain: text, instrumental: false };
       }
     } catch (err) {
-      console.warn("[lyrics] saavn attempt failed:", err.message);
+      if (!isTimeout(err)) console.warn("[lyrics] saavn attempt failed:", err.message);
     }
   }
   return null;
@@ -250,6 +257,7 @@ async function fromSaavn({ track, artist }) {
 
 // ---------- source 3: NetEase Music ----------
 
+const NETEASE_TIMEOUT_MS = 3000;
 const NETEASE_HEADERS = {
   "User-Agent": BROWSER_UA,
   Referer: "https://music.163.com/",
@@ -269,13 +277,14 @@ async function fromNetease({ track, artist }) {
         method: "POST",
         headers: { ...NETEASE_HEADERS, "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({ s: q, type: "1", offset: "0", total: "true", limit: "8" }).toString(),
-      });
+      }, NETEASE_TIMEOUT_MS);
       const songs = search?.result?.songs || [];
       const matches = songs.filter((s) => titleMatches(track, s.name || ""));
       for (const song of matches.slice(0, 3)) {
         const data = await fetchJson(
           `https://music.163.com/api/song/lyric?${new URLSearchParams({ id: String(song.id), lv: "1", kv: "1", tv: "-1" })}`,
-          { headers: NETEASE_HEADERS }
+          { headers: NETEASE_HEADERS },
+          NETEASE_TIMEOUT_MS
         );
         const lrc = data?.lrc?.lyric || "";
         if (!lrc || lrc.length < 30) continue;
@@ -286,6 +295,9 @@ async function fromNetease({ track, artist }) {
           : { synced: null, plain: lrc.trim(), instrumental: false };
       }
     } catch (err) {
+      // NetEase is often unreachable from outside China: one timeout means the
+      // next two queries would time out as well, so give up on it right away.
+      if (isTimeout(err)) return null;
       console.warn("[lyrics] netease attempt failed:", err.message);
     }
   }
@@ -304,7 +316,7 @@ async function fromOvh({ track, artist }) {
       const text = (data?.lyrics || "").trim();
       if (text && text.length > 40) return { synced: null, plain: text, instrumental: false };
     } catch (err) {
-      console.warn("[lyrics] lyrics.ovh failed:", err.message);
+      if (!isTimeout(err)) console.warn("[lyrics] lyrics.ovh failed:", err.message);
     }
   }
   return null;
@@ -344,7 +356,11 @@ async function fromYoutube({ videoId }) {
     if (lines.length < 4) return null;
     return { synced: null, plain: lines.join("\n"), instrumental: false };
   } catch (err) {
-    console.warn("[lyrics] youtube captions failed:", err.message);
+    // "Transcript panel not found" / HTTP 400 just mean this video has no
+    // transcript — that is normal, not an error worth printing.
+    if (!/transcript|status code 400|timeout|timed out/i.test(String(err?.message || err))) {
+      console.warn("[lyrics] youtube captions failed:", err.message);
+    }
     return null;
   }
 }
@@ -360,20 +376,25 @@ const SOURCES = [
 ];
 
 async function findLyrics(query) {
-  // Fire every source at once, then walk them in priority order. Total
-  // latency is the slowest source we actually have to wait for (each is
-  // capped), not the sum of all of them.
-  const running = SOURCES.map((s) =>
+  // Fire the four lightweight text providers at once, then walk them in
+  // priority order. Total latency is the slowest provider we actually have to
+  // wait for (each is capped), not the sum of all of them.
+  const guard = (s) =>
     withTimeout(s.run(query), SOURCE_TIMEOUT_MS + 1500, s.name).catch((err) => {
-      console.warn(`[lyrics] ${s.name} failed:`, err.message);
+      if (!isTimeout(err)) console.warn(`[lyrics] ${s.name} failed:`, err.message);
       return null;
-    })
-  );
-  for (let i = 0; i < SOURCES.length; i++) {
+    });
+  const quick = SOURCES.filter((s) => s.name !== "YouTube captions");
+  const running = quick.map(guard);
+  for (let i = 0; i < quick.length; i++) {
     const result = await running[i];
-    if (hasContent(result)) return { ...result, source: SOURCES[i].name };
+    if (hasContent(result)) return { ...result, source: quick[i].name };
   }
-  return null;
+  // YouTube captions need a full player request for the video, so they only
+  // run when nothing else had the song.
+  const yt = SOURCES.find((s) => s.name === "YouTube captions");
+  const result = await guard(yt);
+  return hasContent(result) ? { ...result, source: yt.name } : null;
 }
 
 export const handler = async (event) => {

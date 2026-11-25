@@ -119,3 +119,30 @@ export async function snippet(res) {
     return "";
   }
 }
+
+/**
+ * One tiny range request. true = CDN served it, false = CDN refused it
+ * (403 etc.), null = unknown (timeout / network hiccup).
+ */
+export async function probeRange({ url, userAgent, rangeParam, timeoutMs = 4000 }) {
+  try {
+    const res = await requestUpstream({ url, userAgent, rangeParam, timeoutMs });
+    res.destroy();
+    return res.statusCode === 200 || res.statusCode === 206;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A range deep inside the file. Without a PO token googlevideo serves only the
+ * first ~850 KB and 403s everything after it, so a shallow probe (first 64 KB)
+ * passes for a url that dies after ~50 s of audio. Probing 1.5 MB in tells the
+ * truth. null = file too short for the limit to matter / length unknown.
+ */
+export function deepRange(url) {
+  const clen = contentLengthOf(url);
+  if (!clen || clen < 1_200_000) return null;
+  const off = Math.min(1_500_000, clen - 4096);
+  return `${off}-${Math.min(off + 4095, clen - 1)}`;
+}

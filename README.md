@@ -1,191 +1,365 @@
-<div align="center">
-
 # Raunaknama
 
-**Where every feeling finds its sound.**
+A personal radio site in the spirit of Deluxe Saloon — plays your own playlist
+through YouTube's **official** IFrame Player API, with a custom barbershop-radio
+interface: hidden video, live "listeners" count, barber-pole progress bar.
 
-A private, premium Bollywood & Hindi music player for the web, Windows and Android. Search any song, sync the lyrics, build playlists, and share them with a link.
+**Stack: React (Vite), single app, powered entirely by Firebase.**
 
-![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=white&style=flat-square)
-![Vite](https://img.shields.io/badge/Vite-5-646CFF?logo=vite&logoColor=white&style=flat-square)
-![Firebase](https://img.shields.io/badge/Firebase-10-FFCA28?logo=firebase&logoColor=black&style=flat-square)
-![Netlify](https://img.shields.io/badge/Netlify-Functions-00C7B7?logo=netlify&logoColor=white&style=flat-square)
-![Platforms](https://img.shields.io/badge/Web%20%7C%20Windows%20%7C%20Android-e2ab3f?style=flat-square)
+> This version has no separate backend server. What used to be a Node/Express
+> API talking to MongoDB is now just Firebase, called directly from the
+> browser:
+> - **Firestore** stores the playlist (replaces MongoDB + the Express CRUD API)
+> - **Realtime Database** powers the live "N in the chair" counter (replaces
+>   Socket.io)
+>
+> That means there's only one folder, one `npm install`, one build, and one
+> deploy. No backend to host separately.
+>
+> The `/api/playlists`, `/api/playlist`, `/api/search`, and `/api/stream`
+> endpoints (yt-dlp powered) are served by **Netlify Functions** in
+> `netlify/functions/`, exposed at `/api/*` via the redirect in
+> `netlify.toml` — no standalone server process to deploy or run.
 
-[**Download the app**](https://github.com/raunakkarn555/raunaknama-music/releases/tag/v4) &nbsp;·&nbsp; [Features](#features) &nbsp;·&nbsp; [Install](#install-the-app) &nbsp;·&nbsp; [Run locally](#run-it-locally) &nbsp;·&nbsp; [Deploy](#deploy)
-
-</div>
+> **Note on ads:** this uses YouTube's real embedded player, just visually
+> hidden. That's the only way to do this within YouTube's terms of service.
+> Some videos may still show a short ad depending on the uploader's monetization
+> settings — there's no legitimate way around that. Picking official
+> "Audio"/lyric-video uploads from labels tends to have fewer ads than random
+> reuploads.
 
 ---
 
-## About
+## What changed from the old MongoDB version, at a glance
 
-Raunaknama is a personal radio and music player with a warm gold and maroon look. It is built for people who just want to open a page, search a song, and listen: no ads in the interface, no clutter, no account to create.
-
-The whole site sits behind a password, so it stays your own private listening room. The Windows and Android apps are available from the [Releases page](https://github.com/raunakkarn555/raunaknama-music/releases/tag/v4).
-
-## Features
-
-### Listening
-- **Search any song.** Type a song, an artist, or a few words from the lyrics. Voice search is built in (Chrome, Edge and Safari).
-- **Recommended page** with mood chips: Romantic, Party, Sad, Retro 90s and Workout. Each mood has a wide mix of artists, so the shelves never feel repetitive.
-- **Radio playlists** loaded from Firebase, plus an endless "Now Playing" queue.
-- **Artist pages** with an About section and all of an artist's songs.
-- **Surprise me.** One tap plays a random track.
-- **Autoplay, shuffle, repeat-one**, and a **sleep timer** for falling asleep to music.
-- **Lock-screen and notification controls** on phones (Media Session), and native media notification support in the Android app.
-
-### Lyrics
-- **Plain lyrics** for the song that is playing.
-- **Synced lyrics (karaoke view).** A full-screen view with the cover on one side and the lyrics moving along with the song. Tap any line to jump to it.
-- Lyrics are looked up from several sources (LRCLIB, NetEase, JioSaavn and lyrics.ovh), so most songs get lyrics.
-
-### Your library
-- **Liked songs.** The heart has an Instagram-style burst animation.
-- **Your playlists.** Create playlists and add songs from any card. They are saved on your device.
-- **Share playlists with a link.** Your own playlists are packed into the link itself, and a friend gets a "Save to my playlists" prompt. Radio playlists share a short `?radio=<id>` link.
-- **Backup and restore.** Download all your playlists and liked songs as a file and upload it on any device.
-- **Your week.** See how long you listened, your top artist and your most played song. This is stored only on your device.
-
-### Look and feel
-- Full-bleed photo backdrop that **crossfades** on every track change, with the title sliding in.
-- Premium login screen, glass cards and a single consistent line-icon set (no emojis).
-- Keyboard shortcuts on desktop, and a built-in **How to use** guide.
-- Responsive: separate backdrop photos for phones, and a layout built for touch.
-
-### Keyboard shortcuts (desktop)
-
-| Key | Action |
+| Old | New |
 |---|---|
-| `Space` | Play / pause |
-| `N` / `P` | Next / previous song |
-| `←` / `→` | Rewind / forward 5 seconds |
-| `↑` / `↓` | Volume up / down |
-| `F` | Full screen on / off |
-| `Esc` | Close search, artist page or any popup |
+| `backend/` (Express + MongoDB + Socket.io) | Deleted entirely |
+| `frontend/` folder | Contents moved up to project root |
+| MongoDB Atlas | Firebase Firestore |
+| Socket.io listener count | Firebase Realtime Database presence |
+| Deploy backend (Render/Railway) *and* frontend (Vercel/Netlify) | Deploy **one** static app to Vercel or Netlify |
+| Edit playlist via `curl` to your API | Edit playlist via `npm run seed` or the Firebase console |
 
-## Install the app
+If you had the old repo cloned, don't try to merge folders — just use this
+project as-is; everything you need is here.
 
-All builds are on the [**Releases page (v4)**](https://github.com/raunakkarn555/raunaknama-music/releases/tag/v4). Open it and scroll down to **Assets**.
+---
 
-### Windows
-1. Download a `.exe` from **Assets**. The **Setup** file installs the app. The **Portable** file runs without installing.
-2. Double-click the file.
-3. If Windows shows "Windows protected your PC", click **More info**, then **Run anyway**. The app is not code-signed, so this warning is normal.
-4. In the installer, click **Next** until it finishes. The app appears on your Desktop and in the Start menu.
+## 1. What you need
 
-### Android
-1. On your phone, open the Releases page and tap the `.apk` file under **Assets**.
-2. When the download finishes, open the file from the notification or from **Files → Downloads**.
-3. If Android asks, allow **Install unknown apps** for your browser in Settings.
-4. Tap **Install**, then **Open**.
+- [Node.js](https://nodejs.org/) 18+
+- A free [Firebase](https://firebase.google.com/) account (just a Google
+  account — no credit card needed for the free "Spark" plan, which is plenty
+  for a personal radio site)
 
-## Tech stack
+---
 
-| Layer | What is used |
-|---|---|
-| Frontend | React 18, Vite 5, plain CSS (no UI library) |
-| Data | Firebase Firestore (playlists), Firebase Realtime Database (live listener count) |
-| API | Netlify Functions at `/api/*` |
-| Streaming | `yt-dlp`, `youtubei.js` and `bgutils-js`, with a Range-aware audio proxy |
-| Playback | HTML5 audio with `hls.js` for HLS streams |
-| Lyrics | LRCLIB, NetEase, JioSaavn, lyrics.ovh |
-| Android app | Capacitor wrapper with native media notification |
+## 2. Create your Firebase project
 
-## Project structure
+You only need to do this section once.
 
-```
-.
-├── src/
-│   ├── App.jsx                  # shell, backdrop crossfade, footer taglines
-│   ├── components/
-│   │   ├── Player.jsx           # player, queue, search, playlists, drawer
-│   │   ├── Dashboard.jsx        # Recommended page and mood chips
-│   │   ├── SyncedLyrics.jsx     # full-screen karaoke lyrics
-│   │   ├── ArtistPage.jsx
-│   │   ├── MediaGrid.jsx
-│   │   ├── PasswordGate.jsx     # login screen
-│   │   ├── GuideButton.jsx      # "How to use" guide
-│   │   ├── AppDownloads.jsx     # "Get the app" card
-│   │   └── Icon.jsx             # shared line-icon set
-│   ├── lib/                     # audio engine, native media session, heart burst
-│   └── hooks/
-├── netlify/functions/           # search, stream, audio-proxy, lyrics, playlists, auth...
-├── scripts/                     # seed.js, yt-dlp downloader, cookie encoder
-├── public/                      # backdrop photos, icons, manifest
-├── firestore.rules
-├── database.rules.json
-└── netlify.toml
-```
+### Step 1 — Create the project
 
-## Run it locally
+1. Go to [console.firebase.google.com](https://console.firebase.google.com)
+   and click **"Add project"**.
+2. Give it a name (e.g. `raunaknama`), click through the prompts (you can
+   disable Google Analytics — not needed here).
 
-**You need:** Node.js 18.18 or newer, and a free [Firebase](https://firebase.google.com/) project.
+### Step 2 — Enable Firestore (stores the playlist)
+
+1. In the left sidebar: **Build → Firestore Database**.
+2. Click **"Create database"**.
+3. Choose **"Start in production mode"**, pick any region close to you, click
+   **Create**.
+4. Go to the **Rules** tab and replace the contents with what's in
+   `firestore.rules` in this project (already written for you — public read,
+   no public write). Click **Publish**.
+
+### Step 3 — Enable Realtime Database (powers the live listener count)
+
+1. In the left sidebar: **Build → Realtime Database**.
+2. Click **"Create database"**, pick a region, choose **"Start in locked
+   mode"**.
+3. Go to the **Rules** tab and replace the contents with what's in
+   `database.rules.json` in this project. Click **Publish**.
+
+### Step 4 — Get your web app config (for `.env`)
+
+1. Click the gear icon → **Project settings**.
+2. Scroll to **"Your apps"**, click the **`</>`** (web) icon to register a
+   new web app. Name it anything (e.g. "raunaknama-web"). You don't need
+   Firebase Hosting here — skip that checkbox.
+3. It'll show you a `firebaseConfig` object — you'll copy these values into
+   `.env` in step 3 below.
+4. Also grab your Realtime Database URL: go back to **Build → Realtime
+   Database**, the URL is shown at the top of the data page (looks like
+   `https://raunaknama-default-rtdb.<region>.firebasedatabase.app`).
+
+### Step 5 — Get a service account key (only needed to run the seed script)
+
+1. Still in **Project settings**, go to the **Service accounts** tab.
+2. Click **"Generate new private key"** → confirm. A JSON file downloads.
+3. Rename it to `serviceAccountKey.json` and put it in the **root** of this
+   project (next to `package.json`). It's already in `.gitignore` — never
+   commit this file or share it; it has full admin access to your project.
+
+---
+
+## 3. Run it locally
 
 ```bash
-git clone https://github.com/raunakkarn555/raunaknama-music.git
-cd raunaknama-music
-cp .env.example .env      # then fill in your values (see below)
-npm install               # also downloads the yt-dlp binary
-npm run seed              # optional: load your starting playlist into Firestore
-npm run dev               # starts Vite + Netlify Functions together
+cp .env.example .env
+# edit .env: paste in the Firebase config values from step 2.4 above
+npm install
 ```
 
-Open **http://localhost:8888**. Do not use port 5173, because the `/api/*` functions only run behind 8888.
+Now build your playlist. Open `scripts/seed.js` and replace the placeholder
+entries with real songs:
 
-### Environment variables
+```js
+{
+  youtubeId: "dQw4w9WgXcQ",   // the part after "v=" in the YouTube URL
+  title: "Song Title",
+  artist: "Artist Name",
+  order: 1,
+},
+```
 
-| Variable | Purpose |
-|---|---|
-| `VITE_FIREBASE_API_KEY`, `VITE_FIREBASE_AUTH_DOMAIN`, `VITE_FIREBASE_PROJECT_ID`, `VITE_FIREBASE_STORAGE_BUCKET`, `VITE_FIREBASE_MESSAGING_SENDER_ID`, `VITE_FIREBASE_APP_ID` | Firebase web app config |
-| `VITE_FIREBASE_DATABASE_URL` | Realtime Database URL |
-| `VITE_API_BASE_URL` | Leave blank when the API is served from the same site |
-| `SITE_PASSWORD` | The password visitors must enter (server only) |
-| `SITE_AUTH_SECRET` | Random secret that signs the 7-day session cookie. Generate with `openssl rand -hex 32` |
-| `YTDLP_COOKIES_B64` | Base64 YouTube cookies, needed for playback (see below) |
-| `AUDIO_PROXY_SECRET` | Signs audio-proxy URLs (falls back to `SITE_AUTH_SECRET`) |
-| `PIPED_API_INSTANCES` | Optional comma-separated Piped instances as a backup resolver |
+Where to get `youtubeId`: open the song on YouTube or YouTube Music, copy the
+URL, and take everything after `v=` (or after `youtu.be/` on short links).
 
-All server variables stay on the server and are never included in the browser bundle.
+Then seed Firestore and start the app:
 
-### Firebase setup (one time)
-1. Create a project at [console.firebase.google.com](https://console.firebase.google.com).
-2. Enable **Firestore** and publish the rules from `firestore.rules`.
-3. Enable **Realtime Database** and publish the rules from `database.rules.json`.
-4. Register a web app and copy its config into `.env`.
-5. To use `npm run seed`, generate a service account key, save it as `serviceAccountKey.json` in the project root, and keep it private.
+```bash
+npm run seed
+npm run dev
+```
 
-### YouTube cookies (needed for playback)
-YouTube blocks stream extraction from anonymous server sessions, so playback needs cookies from a signed-in account (a throwaway account is safer).
+`npm run dev` runs `netlify dev`, which starts both the Vite frontend and
+the yt-dlp-powered Netlify Functions together and proxies them behind one
+port — this matches production exactly, including the `/api/*` routing.
 
-1. Export `youtube.com` cookies in Netscape format with a cookie-export extension.
-2. Encode them with `node scripts/encode-cookies.mjs`.
-3. Put the result in `YTDLP_COOKIES_B64`, locally in `.env` or in Netlify's environment variables.
+Open **`http://localhost:8888`** (not 5173 — that's Vite's own port with no
+functions behind it, `/api/*` calls there will fail) — you should see
+Raunaknama, hear your playlist, and see the listener count tick up.
 
-Cookies expire after a few weeks to months. If songs suddenly stop playing, export and set them again. More detail is in [`COOKIES_SETUP.md`](COOKIES_SETUP.md).
+> First run only: `npm install` downloads the yt-dlp binary automatically
+> (see `scripts/download-ytdlp.mjs`). If you ever need to re-fetch it, run
+> `npm run setup:ytdlp`.
 
-## Deploy
+---
 
-The project is set up for **Netlify**, which serves the static site and the functions together.
+## 3.5 YouTube cookies — required, not optional
 
-1. Push the repo to GitHub.
-2. In Netlify choose **Add new site → Import an existing project** and pick the repo.
-3. Build command `npm run build`, publish directory `dist` (already set in `netlify.toml`).
-4. Add every variable from the table above under **Site settings → Environment variables**.
-5. Deploy. The `/api/*` redirect to the functions is already configured.
+As of 2026, YouTube blocks almost all *stream URL* extraction (i.e. actually
+playing a track — `/api/stream`) from an anonymous/unsigned-in session with
+"Sign in to confirm you're not a bot." Playlist listing and search
+(`/api/playlist`, `/api/search`) don't need this — they use a lighter
+metadata-only call that isn't blocked — but playback will not work at all
+without cookies. If tracks fail with a 502 and the console shows "Sign in
+to confirm" or "YouTube blocked server IP," this is why.
 
-## Security notes
+**Get cookies.txt:**
+1. Open a **private/incognito browser window** and log into youtube.com
+   with any Google account (a throwaway account is fine and safer than your
+   main one).
+2. Install a cookie-export extension (e.g. "Get cookies.txt LOCALLY" for
+   Chrome/Firefox) and export cookies for `youtube.com` in Netscape format.
+3. **Don't log out or close-then-reopen that window afterward** — YouTube
+   rotates session cookies, and logging out invalidates the export
+   immediately. Just close the window once you've exported.
 
-- **Never commit** `.env`, `serviceAccountKey.json`, `cookies.txt` or `cookies.b64`. They contain secrets and session cookies, and `.gitignore` already excludes `.env`, `serviceAccountKey.json` and `*.b64`. Check that `cookies.b64` is not tracked before pushing.
-- The password is checked on the server. It never appears in the frontend code.
-- Playlists and liked songs live in your browser's `localStorage`, so clearing site data removes them. Use **Download backup** first.
+**Wire it up locally** — pick one:
+```bash
+# Option A: point at the file directly
+echo 'YTDLP_COOKIES_PATH=/absolute/path/to/cookies.txt' >> .env
 
-## Disclaimer
+# Option B: base64-encode it into the env (handy for Netlify's env var UI,
+# which doesn't take file uploads)
+echo "YTDLP_COOKIES_B64=$(base64 -w0 cookies.txt)" >> .env   # Linux
+echo "YTDLP_COOKIES_B64=$(base64 -i cookies.txt)" >> .env    # macOS
+```
 
-Raunaknama is a personal, non-commercial project made for learning and private listening. It does not host any audio. Songs are streamed from third-party sources, and all music, artwork and lyrics belong to their respective owners. Please respect the terms of service of those platforms and the rights of artists. If you are a rights holder and want something removed, open an issue.
+**On Netlify:** Site settings → Environment variables → add `YTDLP_COOKIES_B64`
+with the base64 string from Option B above (file paths don't make sense on
+a deployed function, only the base64 form does).
 
-## Credits
+Cookies go stale after a few weeks to months — if playback that used to work
+suddenly starts 502ing again, re-export and re-set the variable.
 
-Crafted with care by **Raunak**.
+---
 
-Thanks to the open-source projects this builds on: React, Vite, Firebase, `yt-dlp`, `youtubei.js`, `hls.js` and LRCLIB.
+## 4. Editing your playlist later
+
+You have two options — no server to restart either way:
+
+**Option A — re-run the seed script.** Edit the track list in
+`scripts/seed.js`, then run:
+
+```bash
+npm run seed
+```
+
+This wipes and replaces the whole `tracks` collection with what's in the
+file — good for reordering or bulk changes.
+
+**Option B — edit directly in the Firebase console.** Go to **Build →
+Firestore Database → Data**, open the `tracks` collection, and add/edit/delete
+documents by hand. Each document needs: `youtubeId` (string), `title`
+(string), `artist` (string), `order` (number), and optionally `cover`
+(string, a custom image URL). Good for quick one-off tweaks.
+
+Refresh the site and the new track shows up in the queue.
+
+---
+
+## 5. Hosting it online — one deploy, on Vercel or Netlify
+
+Because there's no backend server anymore (Firebase *is* the backend), this
+is now a plain static site. **Either Vercel or Netlify works equally well**
+— pick whichever you're more comfortable with. Steps below for both.
+
+First, push this project to a GitHub repo (don't forget: `.env` and
+`serviceAccountKey.json` should **not** be committed — `.gitignore` already
+excludes them).
+
+### Option A — Vercel
+
+1. Go to [vercel.com](https://vercel.com) → **Add New → Project** → import
+   your GitHub repo.
+2. Framework preset: Vercel auto-detects **Vite** — leave build command as
+   `npm run build` and output directory as `dist`.
+3. Under **Environment Variables**, add every `VITE_FIREBASE_*` key from your
+   `.env` file (same names, same values).
+4. Click **Deploy**.
+
+### Option B — Netlify
+
+1. Go to [netlify.com](https://netlify.com) → **Add new site → Import an
+   existing project** → connect your GitHub repo.
+2. Build command: `npm run build`. Publish directory: `dist`.
+3. Under **Site configuration → Environment variables**, add every
+   `VITE_FIREBASE_*` key from your `.env` file.
+4. Click **Deploy site**.
+
+That's it — one deploy, no separate backend to host, no `CLIENT_ORIGIN` or
+CORS config needed (Firebase handles access purely through the security
+rules you set up in section 2).
+
+> **Note:** by default Firebase's free Spark plan allows any website to call
+> your Firestore/Realtime Database as long as it matches your security
+> rules — there's no built-in domain allow-list on the free plan. The rules
+> in this project intentionally only allow public *read* on the playlist and
+> a narrow *write* on the presence path, so this is safe to leave open.
+
+---
+
+## 6. Customizing the look
+
+- Colors, fonts, and the barber-pole motif live in
+  `src/index.css` (tokens) and `src/components/Player.css`.
+- Cover art defaults to the YouTube thumbnail for each video. To use your own
+  image instead, set a `cover` field on that track (via the seed script or
+  Firebase console).
+- The "in the chair" listener count is real — it's driven by Realtime
+  Database presence (one node per open tab, auto-removed on disconnect), so
+  it reflects actual open tabs, not a fake number.
+
+---
+
+## 7. Project structure
+
+```
+raunaknama/
+├── src/
+│   ├── App.jsx              # Layout, listener count, playlist loading
+│   ├── firebase.js          # Firebase init (Firestore + Realtime DB)
+│   ├── components/
+│   │   ├── Player.jsx       # YouTube IFrame API + controls
+│   │   └── Player.css       # Barber-pole progress bar, card styling
+│   ├── index.css            # Design tokens (colors, fonts)
+│   └── main.jsx             # App entry point
+├── scripts/
+│   └── seed.js               # Populate Firestore with your playlist (admin SDK, local-only)
+├── index.html
+├── package.json
+├── vite.config.js
+├── firestore.rules           # Firestore security rules — paste into Firebase console
+├── database.rules.json       # Realtime Database security rules — paste into Firebase console
+├── .env.example
+└── serviceAccountKey.json    # You add this yourself (gitignored) — needed only for `npm run seed`
+```
+
+---
+
+## 8. Password gate
+
+The whole site sits behind a password screen (`src/components/PasswordGate.jsx`),
+checked by a Netlify Function (`netlify/functions/auth.mjs`) — the password
+itself is never in the frontend code or bundle.
+
+- Set it via two **server** environment variables (see `.env.example`):
+  - `SITE_PASSWORD` — the password visitors type in.
+  - `SITE_AUTH_SECRET` — a random string used to sign session cookies
+    (generate one with `openssl rand -hex 32`).
+- On Netlify: **Site settings → Environment variables**. Locally: your `.env`
+  file, used by `netlify dev`.
+- After a correct password, that browser gets an `HttpOnly` session cookie
+  good for **7 days** — it won't be asked again on that device until it
+  expires. A different browser/device (no cookie yet) is always asked.
+
+Have fun with it 💈
+
+---
+
+## Stream resolver (how tracks get a playable URL)
+
+`/api/stream` (fast path) runs, in order:
+
+1. **youtubei.js tier 1** — `ANDROID_VR` + `TV` raced (3.5 s cap)
+2. **youtubei.js tier 2** — `IOS` + `MWEB` + `WEB_EMBEDDED` (only if tier 1 got nothing)
+3. legacy raw InnerTube clients (last resort), then yt-dlp from the browser side
+
+In parallel, public **Piped** instances are asked for a proxied (not IP-bound)
+audio URL. It is sent to the browser as `fallbacks[]`; if the primary URL gives
+a 403 / doesn't start within 4 s, the player switches to it without skipping,
+then re-fetches with `?fallback=true` (Piped first), and only then skips.
+
+`youtube_explode_dart` is Dart-only, so `youtubei.js` is used as its Node equivalent.
+
+**Local test:** `npm run dev` (netlify dev, http://localhost:8888), and
+`npm run test:resolver` / `node test-resolver.mjs [videoId ...]` to check 5 songs:
+resolve time in ms + Range-request (200/206) playability. Config: `.env.example`.
+
+## Audio proxy, PO tokens and Piped (stream fixes)
+
+- `netlify/functions/audio-proxy.mjs` streams googlevideo audio to the `<audio>` element
+  with the User-Agent the extracting client used (YTJS_IOS / YTJS_MWEB / IOS URLs 403 when a
+  browser fetches them directly). `stream.mjs` returns a signed proxy URL for those clients.
+  Range requests are forwarded (seeking works). Set `AUDIO_PROXY_SECRET` in production.
+- No BotGuard/jsdom PO-token minting any more. Two separate Innertube sessions: anonymous (IOS, ~200ms, tier 1;
+  ANDROID_VR/TV/MWEB as tier 3) and cookie-authenticated (WEB only, tier 2).
+- Piped is off unless `PIPED_API_INSTANCES` is set (the old default instances were dead).
+
+### YouTube cookies in the fast resolver
+`_shared/youtubeCookies.mjs` turns `YTDLP_COOKIES_B64` (or `YTDLP_COOKIES_PATH`) into a `Cookie:` header.
+`youtubeiResolver.mjs` builds an authenticated session (TV / MWEB / WEB clients) and an anonymous one
+(IOS / ANDROID_VR) at module load. Cookies are only sent to youtube.com API endpoints — never to googlevideo.com,
+never inside proxy tokens. yt-dlp (frontend `streamClient.js`) now only runs after the fast resolver fails.
+
+---
+
+## v22 changes
+
+- **Terminal errors fixed** — `bgutils-js` is pinned to `~3.2.0` (v4 removed the root export, which caused
+  `Could not resolve "bgutils-js"` / `No "exports" main defined`). PO tokens can mint again, so songs are no
+  longer cut off after ~850 KB (the `chunk … failed: HTTP 403` lines). `jsdom` + `bgutils-js` are marked
+  external in `netlify.toml` (removes the `xhr-sync-worker.js` warning). Run `npm install` once after unzipping.
+- **Faster playback start** — no more 403 → slow yt-dlp retry chain; one probe round-trip less per track;
+  lyrics wait until the song is playing (max 2.5 s) instead of competing with it; NetEase gives up after one
+  3 s timeout; YouTube captions are only tried when every other lyrics source found nothing.
+- **Search = Songs + YouTube** — new `/api/music-search` (YouTube Music songs). The search page shows
+  music Songs first, then a "From YouTube" section with the usual video results.
+- **Artist page chips** — `Songs` (music only, no videos) and `From YouTube` (video results).
+  `/api/artist-songs?source=music|youtube`.

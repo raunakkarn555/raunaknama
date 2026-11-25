@@ -9,7 +9,9 @@
 
 const API_BASE = import.meta.env?.VITE_API_BASE_URL || "";
 const CACHE_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours (googlevideo urls stay valid ~6 h)
-const FAST_TIMEOUT_MS = 18000; // covers a cold start (session init) + tiered clients
+// Covers a cold start + tiered clients + the server-side yt-dlp last resort
+// (the server now runs that itself, so the browser no longer repeats it).
+const FAST_TIMEOUT_MS = 28000;
 // yt-dlp is slow (10-14s) and CPU heavy, so it is a LAST RESORT: it only starts
 // once the fast resolver has actually failed — never in parallel with it.
 const HEDGE_AFTER_MS = null;
@@ -139,8 +141,8 @@ export function fetchStream(id, { forceRefresh = false, background = false, ytdl
   const p = (ytdlp ? slowResolve(id, true) : forceRefresh
     // Retry: a different fast client, with yt-dlp (slow, most tolerant) started
     // in parallel if the fast one is slow or fails — no more waiting in series.
-    ? hedged(() => fastResolve(id, { fresh: true, exclude }), () => slowResolve(id, true))
-    : hedged(() => fastResolve(id), () => slowResolve(id, false)))
+    ? fastResolve(id, { fresh: true, exclude })
+    : fastResolve(id))
     .then((data) => {
       cache.set(id, { data, expires: Date.now() + CACHE_TTL_MS });
       return data;

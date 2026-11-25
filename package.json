@@ -15,7 +15,7 @@
     "test:resolver": "node test-resolver.mjs"
   },
   "dependencies": {
-    "bgutils-js": "^4.0.3",
+    "bgutils-js": "~3.2.0",
     "firebase": "^10.13.0",
     "hls.js": "^1.6.18",
     "jsdom": "^24.1.3",
