@@ -12,12 +12,17 @@ export default defineConfig({
     // fallback (returning index.html for unmatched routes) is what caused
     // the "Unexpected token '<'" JSON parse errors: fetch('/api/playlists')
     // was getting index.html back instead of real JSON.
+    host: true, // reachable from a phone on the same Wi-Fi (http://<pc-ip>:5173)
     proxy: {
+      // changeOrigin stays OFF on purpose: the stream function builds the audio-proxy URL from the
+      // request's Host header. With changeOrigin it became http://localhost:9999/... which a phone
+      // can't reach, so songs failed to stream and fell back to the YouTube player (dies on lock).
       "/api": {
         target: "http://localhost:9999",
-        changeOrigin: true,
+        changeOrigin: false,
         rewrite: (path) => path.replace(/^\/api/, "/.netlify/functions"),
       },
+      "/.netlify": { target: "http://localhost:9999", changeOrigin: false },
     },
   },
 });

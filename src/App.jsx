@@ -206,6 +206,26 @@ const MODE_OPTIONS = [
   { id: 'recommended', label: 'Recommended' },
 ];
 
+function ModeSegment({ mode, onChange }) {
+  return (
+    <div className="mode-seg" role="radiogroup" aria-label="Mode" data-mode={mode}>
+      <span className="mode-seg-thumb" aria-hidden="true" />
+      {MODE_OPTIONS.map((m) => (
+        <button
+          key={m.id}
+          type="button"
+          role="radio"
+          aria-checked={mode === m.id}
+          className={`mode-seg-btn ${mode === m.id ? 'is-active' : ''}`}
+          onClick={() => onChange(m.id)}
+        >
+          <Icon name={m.id === 'recommended' ? 'sparkles' : 'radio'} /> {m.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function ModeMenu({ mode, onChange }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef(null);
@@ -332,6 +352,16 @@ function App() {
   // (single source of truth for liked songs + the playlist picker).
   const playerApiRef = useRef(null);
   const [likedIdList, setLikedIdList] = useState([]);
+  const [playlistsInfo, setPlaylistsInfo] = useState({ radio: [], custom: [], activeId: null });
+  const handleMode = useCallback((m) => {
+    setMode(m);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }, []);
+  // Recommended -> playlist card: same as picking it in the sidebar, then bring the player into view.
+  const selectPlaylistFromReco = useCallback((id) => {
+    playerApiRef.current?.selectPlaylist?.(id);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }, []);
   const likedIds = useMemo(() => new Set(likedIdList), [likedIdList]);
   const recoToTrack = (it) => ({ id: it.id, title: it.title, channel: it.channel || it.subtitle || null, duration: it.durationSeconds });
   const toggleRecoLike = useCallback((it) => playerApiRef.current?.toggleLike(recoToTrack(it)), []);
@@ -550,6 +580,7 @@ function App() {
 
         <div className="topbar-right">
           <NavClock />
+          <ModeSegment mode={mode} onChange={setMode} />
           <ModeMenu mode={mode} onChange={setMode} />
           <div className="listener-pill">
             <span className="dot" aria-hidden="true" />
@@ -573,6 +604,9 @@ function App() {
           playRequest={playRequest}
           onPlayerApi={(api) => { playerApiRef.current = api; }}
           onLikedChange={setLikedIdList}
+          onPlaylistsChange={setPlaylistsInfo}
+          mode={mode}
+          onModeChange={handleMode}
           menuOpen={menuOpen}
           onCloseMenu={closeMenu}
           backgroundImageUrl={isMobile ? `/bg/mobile/${bgIndex}.jpg` : `/bg/${bgIndex}.jpg`}
@@ -586,6 +620,12 @@ function App() {
               onAddToPlaylist={addRecoToPlaylist}
               onSelect={playRecommended}
               onWarm={(t) => warmStream(t.id)}
+              onOpenArtist={(a) => playerApiRef.current?.openArtist?.(a)}
+              playlists={playlistsInfo}
+              activePlaylistId={playlistsInfo.activeId}
+              onSelectPlaylist={selectPlaylistFromReco}
+              mode={mode}
+              onModeChange={handleMode}
             />
           </div>
         )}

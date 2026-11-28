@@ -83,3 +83,5 @@
   flex: none; width: 20px; height: 20px; display: grid; place-items: center; border-radius: 50%; margin-top: 1px;
   font-size: 0.68rem; font-weight: 800; color: var(--stripe-gold, #e2ab3f); background: rgba(226, 171, 63, 0.14);
 }
+
+.apd-install { width: 100%; justify-content: center; margin-bottom: 10px; }

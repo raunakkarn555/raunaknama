@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import "./SyncedLyrics.css";
 import Icon from "./Icon";
+import ScriptToggle from "./ScriptToggle";
 
 // Full-screen, time-synced lyrics view. Only ever mounted when the listener
 // explicitly chooses "Synced view" from the lyrics panel — the normal player
@@ -47,6 +48,8 @@ export default function SyncedLyrics({
   onPrev,
   onNext,
   onShowPlain,
+  scriptMode = "orig",
+  onScriptMode,
 }) {
   const scrollerRef = useRef(null);
   const lineRefs = useRef([]);
@@ -114,6 +117,8 @@ export default function SyncedLyrics({
       <button type="button" className="sl-close" onClick={onClose} aria-label="Close synced lyrics">
         <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" /></svg>
       </button>
+
+      {onScriptMode && hasLines && <ScriptToggle mode={scriptMode} onChange={onScriptMode} className="sl-script" />}
 
       <div className="sl-layout">
         <section className="sl-side">
@@ -191,7 +196,7 @@ export default function SyncedLyrics({
                     data-dist={dist}
                     onClick={() => { userScrollUntil.current = 0; onSeek(l.time); }}
                   >
-                    {l.text || <Icon name="music" />}
+                    <span dir="auto">{l.text || <Icon name="music" />}</span>
                   </button>
                 );
               })}

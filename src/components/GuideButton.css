@@ -235,3 +235,25 @@
 
 .guide-tab { display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
 .guide-tab .ui-icon { width: 1.05em; height: 1.05em; }
+
+/* ---------- Guide card: polish (4 tabs, scroll progress, custom scrollbar) ---------- */
+.guide-tabs { gap: 6px; }
+.guide-tab { flex: 1 1 0; min-width: 0; justify-content: center; padding-left: 8px; padding-right: 8px; white-space: nowrap; }
+.guide-subhead { margin: 16px 0 8px; font-size: 0.72rem; font-weight: 800; letter-spacing: 0.14em; text-transform: uppercase; color: var(--stripe-gold, #e2ab3f); }
+
+/* thin gold progress line above the scrolling area */
+.guide-progress { height: 3px; margin: 0 20px 8px; border-radius: 3px; background: rgba(244, 232, 216, 0.1); overflow: hidden; flex: 0 0 auto; }
+.guide-progress span { display: block; width: 100%; height: 100%; transform-origin: left center; transform: scaleX(0);
+  background: linear-gradient(90deg, var(--stripe-gold, #e2ab3f), var(--stripe-red, #b8333a)); transition: transform 0.12s linear; }
+
+/* vertical scrollbar: slim, gold on hover, soft fade at both edges */
+.guide-body {
+  padding-top: 4px; scroll-padding-top: 8px;
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 10px, #000 calc(100% - 22px), transparent 100%);
+  mask-image: linear-gradient(to bottom, transparent 0, #000 10px, #000 calc(100% - 22px), transparent 100%);
+}
+.guide-body::-webkit-scrollbar { width: 8px; }
+.guide-body::-webkit-scrollbar-track { background: transparent; margin: 10px 0; }
+/* thumb: global theme scrollbar (index.css) */
+@media (max-width: 520px) { .guide-progress { margin: 0 16px 6px; } .guide-tab { font-size: 12px; } }
+@supports (-moz-appearance: none) { .guide-body { scrollbar-width: thin; scrollbar-color: rgba(226, 171, 63, 0.65) transparent; } }

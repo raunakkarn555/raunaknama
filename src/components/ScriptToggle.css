@@ -1,0 +1,8 @@
+.script-toggle { display: inline-flex; align-items: center; gap: 2px; padding: 3px; border-radius: 999px; border: 1px solid var(--glass-border, rgba(244, 232, 216, 0.14)); background: rgba(21, 10, 13, 0.6); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); max-width: 100%; }
+.script-toggle-btn { border: none; background: transparent; color: rgba(244, 232, 216, 0.82); font: inherit; font-size: 13px; font-weight: 700; padding: 6px 12px; border-radius: 999px; cursor: pointer; white-space: nowrap; transition: background 0.15s ease, color 0.15s ease; }
+.script-toggle-btn:hover:not(:disabled) { background: rgba(244, 232, 216, 0.1); }
+.script-toggle-btn.is-active { color: var(--bg, #150a0d); background: linear-gradient(160deg, var(--track-accent-soft, #e2ab3f), var(--track-accent, #b8333a)); }
+.script-toggle-btn:disabled { opacity: 0.5; cursor: default; }
+.script-toggle-btn:focus-visible { outline: 2px solid var(--cream, #f4e8d8); outline-offset: 2px; }
+.sl-script { position: absolute; top: 14px; left: 14px; z-index: 5; }
+@media (max-width: 600px) { .script-toggle-btn { padding: 5px 9px; font-size: 12px; } }

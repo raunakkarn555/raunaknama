@@ -146,6 +146,88 @@ function htmlToText(html) {
     .trim();
 }
 
+// ---------- validation: make sure a lyrics hit is really THIS song ----------
+// Matching on a few shared words alone returned the wrong song for common titles
+// ("I Love You", "Zara Sa", ...). A candidate must now pass a title check AND be
+// confirmed by the artist (named in the YouTube title / channel) or by its duration,
+// and lyrics in a script that does not fit the song (e.g. Chinese for a Hindi title) are rejected.
+
+const TITLE_NOISE = new Set(["the", "a", "an", "of", "from", "feat", "ft", "version", "movie", "film", "song", "songs", "full", "video", "audio", "lyrics", "lyrical"]);
+const titleWords = (s) => new Set(normalize(s).split(" ").filter((w) => w && !TITLE_NOISE.has(w)));
+
+function titleSimilarity(variants, gotTitle) {
+  const got = titleWords(cleanTrackName(gotTitle) || gotTitle);
+  if (!got.size) return 0;
+  let best = 0;
+  for (const v of variants) {
+    const want = titleWords(v);
+    if (!want.size) continue;
+    let hits = 0;
+    for (const w of want) if (got.has(w)) hits += 1;
+    let sim = hits / Math.max(want.size, got.size);
+    // "Song" inside a longer YouTube title, or the title with a few extra words.
+    if (got.size >= 3 && hits === got.size) sim = Math.max(sim, 0.8);
+    if (want.size >= 3 && hits === want.size && got.size - hits <= 2) sim = Math.max(sim, 0.85);
+    // One-word titles must match exactly.
+    if (want.size === 1 || got.size === 1) sim = hits === want.size && hits === got.size ? 1 : 0;
+    if (sim > best) best = sim;
+  }
+  return best;
+}
+
+// Do the candidate's artist name(s) appear in the YouTube title / channel text?
+function artistMatches(hayNorm, candArtist) {
+  if (!candArtist) return false;
+  const hay = new Set(hayNorm.split(" ").filter(Boolean));
+  return String(candArtist)
+    .split(/,|&|\/|;|\band\b|\bfeat\.?\b|\bft\.?\b/i)
+    .some((name) => {
+      const toks = normalize(name).split(" ").filter((w) => w.length >= 2 && !TITLE_NOISE.has(w));
+      if (!toks.length) return false;
+      const hit = toks.filter((w) => hay.has(w)).length;
+      return hit >= 1 && hit >= Math.ceil(toks.length / 2);
+    });
+}
+
+// Every script is accepted now (Hindi, Roman, Urdu, Punjabi, Tamil, Arabic, Chinese, Korean, ...).
+// Correctness no longer depends on the script: a hit must pass the title + artist + duration checks
+// in judgeCandidate() (and the synced-length check below) to count as "this song".
+function scriptOk() {
+  return true;
+}
+
+// Synced lyrics cannot run longer than the song: a last timestamp well past the song's end means another recording.
+function syncedFits(lrc, durationSecs) {
+  if (!lrc || !durationSecs) return true;
+  let last = 0;
+  for (const m of lrc.matchAll(/\[(\d{1,3}):(\d{2}(?:\.\d+)?)\]/g)) {
+    const t = Number(m[1]) * 60 + Number(m[2]);
+    if (t > last) last = t;
+  }
+  return last <= durationSecs + 8;
+}
+
+/**
+ * Score a candidate song from a provider. 0 = not the same song.
+ * meta: { track, artist, duration }  cand: { title, artist, duration }
+ */
+function judgeCandidate(meta, cand, { requireArtist = false } = {}) {
+  const sim = titleSimilarity(titleVariants(meta.track), cand.title || "");
+  if (sim < 0.75) return 0;
+  const hay = normalize(`${meta.track} ${meta.artist || ""}`);
+  const artistOk = artistMatches(hay, cand.artist);
+  const dur = meta.duration && cand.duration ? Math.abs(meta.duration - cand.duration) : null;
+  if (requireArtist && !artistOk) return 0;
+  if (artistOk) {
+    if (dur !== null && dur > 20) return 0; // right artist but a different recording (live / remix)
+  } else {
+    // Same title is NOT enough ("I Love You", "Zara Sa" ... exist by many artists): without the
+    // artist confirming it, only a (near) identical title AND an almost identical length is accepted.
+    if (dur === null || dur > 2 || sim < 0.95) return 0;
+  }
+  return sim + (artistOk ? 0.5 : 0) + (dur !== null ? Math.max(0, (20 - dur) / 40) : 0);
+}
+
 const isTimeout = (err) => /timeout|timed out|aborted/i.test(String(err?.message || err));
 const hasContent = (r) => r && ((r.synced && r.synced.trim()) || (r.plain && r.plain.trim()));
 
@@ -160,11 +242,21 @@ async function lrclibFetch(path) {
 async function fromLrclib({ track, artist, duration }) {
   const titles = titleVariants(track);
   const durationSecs = Number.isFinite(duration) ? Math.round(duration) : null;
+  const meta = { track, artist, duration: durationSecs };
   const pick = (results) => {
-    if (!Array.isArray(results) || !results.length) return null;
-    const good = results.filter((r) => titleMatches(track, r.trackName || ""));
-    const pool = good.length ? good : [];
-    return pool.find((r) => r.syncedLyrics) || pool.find((r) => r.plainLyrics) || null;
+    const list = Array.isArray(results) ? results : results ? [results] : [];
+    let best = null;
+    let bestScore = 0;
+    for (const r of list) {
+      if (!(r.syncedLyrics || r.plainLyrics)) continue;
+      const score = judgeCandidate(meta, { title: r.trackName, artist: r.artistName, duration: r.duration });
+      if (!score) continue;
+      if (!scriptOk(`${track} ${artist || ""}`, r.syncedLyrics || r.plainLyrics)) continue;
+      if (r.syncedLyrics && !syncedFits(r.syncedLyrics, durationSecs)) continue;
+      const total = score + (r.syncedLyrics ? 0.05 : 0);
+      if (total > bestScore) { best = r; bestScore = total; }
+    }
+    return best;
   };
   const wrap = (hit) =>
     hit && (hit.syncedLyrics || hit.plainLyrics)
@@ -178,8 +270,8 @@ async function fromLrclib({ track, artist, duration }) {
   const attempts = [];
   for (const t of titles) {
     if (artist && durationSecs) {
-      attempts.push(() =>
-        lrclibFetch(`/api/get?${new URLSearchParams({ track_name: t, artist_name: artist, duration: String(durationSecs) })}`)
+      attempts.push(async () =>
+        pick(await lrclibFetch(`/api/get?${new URLSearchParams({ track_name: t, artist_name: artist, duration: String(durationSecs) })}`))
       );
     }
     attempts.push(async () => {
@@ -205,7 +297,8 @@ async function fromLrclib({ track, artist, duration }) {
 
 // ---------- source 2: JioSaavn (great for Bollywood) ----------
 
-async function fromSaavn({ track, artist }) {
+async function fromSaavn({ track, artist, duration }) {
+  const meta = { track, artist, duration: Number.isFinite(duration) ? Math.round(duration) : null };
   const titles = titleVariants(track);
   const queries = [];
   for (const t of titles) {
@@ -228,9 +321,21 @@ async function fromSaavn({ track, artist }) {
         { headers: { "User-Agent": BROWSER_UA, Accept: "application/json" } }
       );
       const list = search?.results || search?.data?.results || [];
-      const candidates = list.filter(
-        (s) => titleMatches(track, s.title || s.song || "") && String(s.more_info?.has_lyrics ?? s.has_lyrics ?? "true") !== "false"
-      );
+      const saavnArtists = (s) =>
+        s.more_info?.artistMap?.primary_artists?.map((a) => a.name).join(", ") || s.more_info?.music || s.primary_artists || s.subtitle || "";
+      const candidates = list
+        .filter((s) => String(s.more_info?.has_lyrics ?? s.has_lyrics ?? "true") !== "false")
+        .map((s) => ({
+          song: s,
+          score: judgeCandidate(meta, {
+            title: htmlToText(s.title || s.song || ""),
+            artist: htmlToText(String(saavnArtists(s))),
+            duration: Number(s.more_info?.duration || s.duration) || null,
+          }),
+        }))
+        .filter((c) => c.score > 0)
+        .sort((a, b) => b.score - a.score)
+        .map((c) => c.song);
       for (const song of candidates.slice(0, 3)) {
         const lyricsId = song.more_info?.lyrics_id || song.lyrics_id || song.id;
         if (!lyricsId) continue;
@@ -246,7 +351,7 @@ async function fromSaavn({ track, artist }) {
           { headers: { "User-Agent": BROWSER_UA, Accept: "application/json" } }
         );
         const text = htmlToText(data?.lyrics || data?.data?.lyrics || "");
-        if (text && text.length > 40) return { synced: null, plain: text, instrumental: false };
+        if (text && text.length > 40 && scriptOk(`${track} ${artist || ""}`, text)) return { synced: null, plain: text, instrumental: false };
       }
     } catch (err) {
       if (!isTimeout(err)) console.warn("[lyrics] saavn attempt failed:", err.message);
@@ -264,7 +369,8 @@ const NETEASE_HEADERS = {
   Accept: "application/json",
 };
 
-async function fromNetease({ track, artist }) {
+async function fromNetease({ track, artist, duration }) {
+  const meta = { track, artist, duration: Number.isFinite(duration) ? Math.round(duration) : null };
   const titles = titleVariants(track);
   const queries = [];
   for (const t of titles.slice(0, 2)) {
@@ -279,7 +385,19 @@ async function fromNetease({ track, artist }) {
         body: new URLSearchParams({ s: q, type: "1", offset: "0", total: "true", limit: "8" }).toString(),
       }, NETEASE_TIMEOUT_MS);
       const songs = search?.result?.songs || [];
-      const matches = songs.filter((s) => titleMatches(track, s.name || ""));
+      // NetEase is a mostly-Chinese catalogue full of same-titled songs: the artist MUST match.
+      const matches = songs
+        .map((s) => ({
+          song: s,
+          score: judgeCandidate(
+            meta,
+            { title: s.name || "", artist: (s.artists || s.ar || []).map((a) => a.name).join(", "), duration: s.duration ? s.duration / 1000 : null },
+            { requireArtist: true }
+          ),
+        }))
+        .filter((c) => c.score > 0)
+        .sort((a, b) => b.score - a.score)
+        .map((c) => c.song);
       for (const song of matches.slice(0, 3)) {
         const data = await fetchJson(
           `https://music.163.com/api/song/lyric?${new URLSearchParams({ id: String(song.id), lv: "1", kv: "1", tv: "-1" })}`,
@@ -288,6 +406,8 @@ async function fromNetease({ track, artist }) {
         );
         const lrc = data?.lrc?.lyric || "";
         if (!lrc || lrc.length < 30) continue;
+        if (!scriptOk(`${track} ${artist || ""}`, lrc)) continue;
+        if (!syncedFits(lrc, meta.duration)) continue;
         const hasTime = /\[\d{1,2}:\d{2}/.test(lrc);
         // Strip credit lines like "作词 : xxx" that some uploads include.
         return hasTime
@@ -314,7 +434,7 @@ async function fromOvh({ track, artist }) {
         `https://api.lyrics.ovh/v1/${encodeURIComponent(artist)}/${encodeURIComponent(t)}`
       );
       const text = (data?.lyrics || "").trim();
-      if (text && text.length > 40) return { synced: null, plain: text, instrumental: false };
+      if (text && text.length > 40 && scriptOk(`${track} ${artist || ""}`, text)) return { synced: null, plain: text, instrumental: false };
     } catch (err) {
       if (!isTimeout(err)) console.warn("[lyrics] lyrics.ovh failed:", err.message);
     }
@@ -354,7 +474,9 @@ async function fromYoutube({ videoId }) {
       .map((s) => (s?.snippet?.text || s?.snippet?.toString?.() || "").trim())
       .filter((l) => l && !/^\[.*\]$/.test(l));
     if (lines.length < 4) return null;
-    return { synced: null, plain: lines.join("\n"), instrumental: false };
+    const plain = lines.join("\n");
+    if (!scriptOk("", plain)) return null;
+    return { synced: null, plain, instrumental: false };
   } catch (err) {
     // "Transcript panel not found" / HTTP 400 just mean this video has no
     // transcript — that is normal, not an error worth printing.
@@ -414,7 +536,7 @@ export const handler = async (event) => {
 
   const durationNum = duration ? Number(duration) : null;
   const artistClean = cleanArtist(artist || "");
-  const cacheKey = `${track.trim().toLowerCase()}::${artistClean.toLowerCase()}::${durationNum || ""}::${id || ""}`;
+  const cacheKey = `v3::${track.trim().toLowerCase()}::${artistClean.toLowerCase()}::${durationNum || ""}::${id || ""}`;
 
   const cached = getCached(lyricsCache, cacheKey);
   if (cached) {
@@ -462,3 +584,6 @@ export const handler = async (event) => {
     };
   }
 };
+
+// exported only so the matching rules can be unit-tested
+export const __test = { judgeCandidate, scriptOk, titleSimilarity, artistMatches, titleVariants, cleanArtist, normalize };

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import './GuideButton.css';
 import Icon from './Icon';
 
@@ -13,7 +13,32 @@ const DESKTOP_SHORTCUTS = [
   { keys: ['↑'], what: 'Volume up' },
   { keys: ['↓'], what: 'Volume down' },
   { keys: ['F'], what: 'Full screen on / off' },
-  { keys: ['Esc'], what: 'Close search, artist page or any popup' },
+  { keys: ['Esc'], what: 'Close search, artist page, full view or any popup' },
+];
+
+// Extra keys that only work inside the Full view page.
+const FULLVIEW_SHORTCUTS = [
+  { keys: ['Space'], what: 'Play / Pause (also here)' },
+  { keys: ['←', '→'], what: 'Rewind / forward 5 seconds' },
+  { keys: ['Esc'], what: 'Close the Full view' },
+];
+
+// What the newer parts of the app can do (shown in the "New" tab).
+const NEW_FEATURES = [
+  { icon: 'expand', title: 'Full view', text: 'Tap the expand button next to the heart / mic on the player. You get a full page with the big spinning cover, the ring, all controls, a Synced lyrics button and a Close / Back button. On a phone, swipe down from the top to close it.' },
+  { icon: 'sparkles', title: 'Mode: Default / Recommended', text: 'Switch from the top bar, from the menu (top of the side drawer) or from the top of the Recommended page. Default is the plain player, Recommended adds endless song shelves.' },
+  { icon: 'mic2', title: 'Artists for you', text: 'A row of 12 artists on the Recommended page, new ones every visit. Tap one to open their page and all their songs. Use Shuffle (or the arrows on a laptop) to see more.' },
+  { icon: 'listMusic', title: 'Playlists between songs', text: 'A few times while you scroll, a shelf of your playlists (and radio playlists) appears. Tap one to load it into the player.' },
+  { icon: 'heart', title: 'Moods', text: 'Pick All, Romantic, Party, Sad, Retro 90s or Workout to get shelves only for that mood.' },
+  { icon: 'moon', title: 'Back to top', text: 'On a long Recommended page a gold arrow button appears at the bottom-right. One tap takes you back up to the player.' },
+  { icon: 'play', title: 'Fast start', text: 'If a song cannot be streamed fully, the app switches to the YouTube player by itself so it still plays the whole song.' },
+];
+
+// Good to know (shown at the bottom of the "New" tab).
+const GOOD_TO_KNOW = [
+  'The YouTube player mode needs the screen to stay on: on some phones the music can pause when the screen locks. Keep the app open, or use the normal mode.',
+  'Artist photos come from the web. If one does not load, you see the initials instead; tapping still works.',
+  'Recently played songs are kept on your device for a short while only and clear themselves automatically.',
 ];
 
 const MOBILE_TIPS = [
@@ -30,6 +55,9 @@ const MOBILE_TIPS = [
   { icon: 'dice', title: 'Surprise me', text: 'Not sure what to play? One tap picks a random song for you.' },
   { icon: 'lock', title: 'Lock screen controls', text: 'Play, pause, next and previous also work from your notification shade and lock screen.' },
   { icon: 'expand', title: 'Full screen', text: 'Use the full-screen button in the top bar for an immersive view.' },
+  { icon: 'sparkles', title: 'Full view page', text: 'Tap the expand button on the player for a full page with the big cover, ring, buttons and lyrics. Swipe down from the top (or tap Back / X) to close.' },
+  { icon: 'radio', title: 'Mode switch', text: 'Open the menu: the Mode switch is at the top. Choose Default or Recommended any time.' },
+  { icon: 'mic2', title: 'Artists & playlists', text: 'On the Recommended page, swipe the Artists row sideways and tap a playlist shelf to load it.' },
 ];
 
 const PLAYLIST_STEPS = [
@@ -45,6 +73,17 @@ const PLAYLIST_STEPS = [
 function GuideButton() {
   const [open, setOpen] = useState(false);
   const [tab, setTab] = useState('laptop');
+  const bodyRef = useRef(null);
+  const [progress, setProgress] = useState(0);
+  const onBodyScroll = (e) => {
+    const el = e.currentTarget;
+    const max = el.scrollHeight - el.clientHeight;
+    setProgress(max > 0 ? Math.min(1, el.scrollTop / max) : 0);
+  };
+  useEffect(() => {
+    if (bodyRef.current) bodyRef.current.scrollTop = 0;
+    setProgress(0);
+  }, [tab, open]);
 
   useEffect(() => {
     if (!open) return undefined;
@@ -113,6 +152,15 @@ function GuideButton() {
               <button
                 type="button"
                 role="tab"
+                aria-selected={tab === 'new'}
+                className={`guide-tab ${tab === 'new' ? 'is-active' : ''}`}
+                onClick={() => setTab('new')}
+              >
+                <Icon name="sparkles" /> New
+              </button>
+              <button
+                type="button"
+                role="tab"
                 aria-selected={tab === 'mobile'}
                 className={`guide-tab ${tab === 'mobile' ? 'is-active' : ''}`}
                 onClick={() => setTab('mobile')}
@@ -121,7 +169,8 @@ function GuideButton() {
               </button>
             </div>
 
-            <div className="guide-body">
+            <div className="guide-progress" aria-hidden="true"><span style={{ transform: `scaleX(${progress})` }} /></div>
+            <div className="guide-body" ref={bodyRef} onScroll={onBodyScroll}>
               {tab === 'laptop' ? (
                 <>
                   <p className="guide-intro">
@@ -129,6 +178,19 @@ function GuideButton() {
                   </p>
                   <ul className="guide-list">
                     {DESKTOP_SHORTCUTS.map((s) => (
+                      <li key={s.what} className="guide-row">
+                        <span className="guide-keys">
+                          {s.keys.map((k) => (
+                            <kbd key={k} className="guide-kbd">{k}</kbd>
+                          ))}
+                        </span>
+                        <span className="guide-what">{s.what}</span>
+                      </li>
+                    ))}
+                  </ul>
+                  <p className="guide-subhead">In the Full view</p>
+                  <ul className="guide-list">
+                    {FULLVIEW_SHORTCUTS.map((s) => (
                       <li key={s.what} className="guide-row">
                         <span className="guide-keys">
                           {s.keys.map((k) => (
@@ -167,6 +229,24 @@ function GuideButton() {
                       <b>Backup:</b> menu ke "Your playlists" section me "Download backup" se file save kar lo, aur kisi
                       bhi device par "Upload backup" se wapas la sakte ho. Naya phone ya laptop lene se pehle backup zaroor lo.
                     </span>
+                  </div>
+                </>
+              ) : tab === 'new' ? (
+                <>
+                  <ul className="guide-list guide-list--tips">
+                    {NEW_FEATURES.map((t) => (
+                      <li key={t.title} className="guide-tip">
+                        <span className="guide-tip-icon" aria-hidden="true"><Icon name={t.icon} size="16px" /></span>
+                        <span className="guide-tip-text">
+                          <strong>{t.title}</strong>
+                          <span>{t.text}</span>
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                  <div className="guide-note">
+                    <strong>Good to know</strong>
+                    {GOOD_TO_KNOW.map((g) => <span key={g}>{g}</span>)}
                   </div>
                 </>
               ) : (

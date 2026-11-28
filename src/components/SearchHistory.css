@@ -1,0 +1,18 @@
+.sh-wrap { width: min(100%, 720px); margin: 0 auto; padding: 8px 4px 18px; display: flex; flex-direction: column; gap: 18px; }
+.sh-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
+.sh-title { margin: 0; font-family: var(--font-display, inherit); font-size: 0.95rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--stripe-gold, #e2ab3f); }
+.sh-clear { border: none; background: transparent; color: rgba(244, 232, 216, 0.75); font: inherit; font-size: 0.85rem; font-weight: 700; cursor: pointer; padding: 6px 8px; border-radius: 8px; }
+.sh-clear:hover { color: var(--cream, #f4e8d8); background: rgba(244, 232, 216, 0.08); }
+.sh-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.sh-row { display: flex; align-items: center; border-radius: 12px; }
+.sh-row:hover { background: rgba(244, 232, 216, 0.07); }
+.sh-pick { flex: 1; min-width: 0; display: flex; align-items: center; gap: 12px; padding: 11px 10px; border: none; background: transparent; color: var(--cream, #f4e8d8); font: inherit; font-size: 0.98rem; text-align: left; cursor: pointer; border-radius: 12px; }
+.sh-ico { display: grid; place-items: center; width: 20px; color: rgba(244, 232, 216, 0.6); flex: 0 0 auto; }
+.sh-ico .ui-icon { width: 18px; height: 18px; }
+.sh-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sh-x { flex: 0 0 auto; width: 36px; height: 36px; border: none; background: transparent; color: rgba(244, 232, 216, 0.6); font-size: 22px; line-height: 1; cursor: pointer; border-radius: 50%; }
+.sh-x:hover { color: var(--cream, #f4e8d8); background: rgba(244, 232, 216, 0.1); }
+.sh-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.sh-chip { padding: 8px 14px; border-radius: 999px; border: 1px solid var(--glass-border, rgba(244, 232, 216, 0.14)); background: var(--glass, rgba(21, 10, 13, 0.55)); color: var(--cream, #f4e8d8); font: inherit; font-size: 0.88rem; font-weight: 600; cursor: pointer; transition: border-color 0.15s ease, transform 0.12s ease; }
+.sh-chip:hover { border-color: var(--stripe-gold, #e2ab3f); transform: translateY(-1px); }
+.sh-pick:focus-visible, .sh-chip:focus-visible, .sh-x:focus-visible, .sh-clear:focus-visible { outline: 2px solid var(--stripe-gold, #e2ab3f); outline-offset: 2px; }

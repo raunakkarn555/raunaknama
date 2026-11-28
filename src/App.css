@@ -882,3 +882,29 @@ body:has(.guide-overlay, .sp-page, .sl-root, .lyrics-modal-overlay, .playlist-mo
 @media (prefers-reduced-motion: reduce) {
   .pole-chip { animation-duration: 12s; }
 }
+
+/* ---------- Topbar Mode: premium segmented switch (wide screens), dropdown (narrow) ---------- */
+.mode-seg {
+  position: relative; display: inline-grid; grid-template-columns: 1fr 1fr; padding: 3px; border-radius: 999px; flex: 0 0 auto;
+  background: var(--glass); border: 1px solid var(--glass-border);
+  backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+}
+.mode-seg-thumb {
+  position: absolute; top: 3px; bottom: 3px; left: 3px; width: calc(50% - 3px); border-radius: 999px;
+  background: linear-gradient(160deg, var(--stripe-gold), var(--stripe-red)); box-shadow: 0 6px 16px -6px rgba(184, 51, 58, 0.85);
+  transition: transform 0.3s cubic-bezier(0.32, 0.72, 0, 1);
+}
+.mode-seg[data-mode="recommended"] .mode-seg-thumb { transform: translateX(100%); }
+.mode-seg-btn {
+  position: relative; z-index: 1; display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 34px; padding: 0 14px;
+  border: 0; background: none; border-radius: 999px; cursor: pointer; font: 700 12.5px/1 var(--font-body); letter-spacing: 0.03em;
+  color: rgba(244, 232, 216, 0.82); transition: color 0.2s ease;
+}
+.mode-seg-btn .ui-icon { width: 14px; height: 14px; }
+.mode-seg-btn.is-active { color: var(--bg); }
+.mode-seg-btn:focus-visible { outline: 2px solid var(--cream); outline-offset: 2px; }
+.mode-menu { display: none; }
+@media (max-width: 860px) {
+  .mode-seg { display: none; }
+  .mode-menu { display: block; }
+}

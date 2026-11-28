@@ -23,7 +23,11 @@ import {
 } from "../streamClient";
 import ArtistPage, { ArtistSearchCard } from "./ArtistPage";
 import SyncedLyrics from "./SyncedLyrics";
+import FullPlayer from "./FullPlayer";
 import Icon from "./Icon";
+import SearchHistory, { saveSearchQuery } from "./SearchHistory";
+import ScriptToggle from "./ScriptToggle";
+import { convertLyrics, scriptAvailability, SCRIPT_MODES, SCRIPT_STORAGE_KEY } from "../lib/script";
 import AppDownloads from "./AppDownloads";
 import { burstHearts } from "../lib/heartBurst";
 
@@ -552,6 +556,9 @@ const persistListeningStats = (stats) => {
   }
 };
 
+// Real artist info fetched per track id (module-level so it survives re-renders / track switches).
+const TRACK_INFO_CACHE = new Map();
+
 const statsArtistName = (track) =>
   (track?.channel || "").replace(/\s*-\s*topic\s*$/i, "").trim() || "Unknown artist";
 
@@ -619,6 +626,15 @@ const ShareIcon = () => (
     <circle cx="6" cy="12" r="3" />
     <circle cx="18" cy="19" r="3" />
     <path d="M8.6 13.5l6.8 4M15.4 6.5l-6.8 4" />
+  </svg>
+);
+
+const ExpandIcon = () => (
+  <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <polyline points="15 3 21 3 21 9" />
+    <polyline points="9 21 3 21 3 15" />
+    <line x1="21" y1="3" x2="14" y2="10" />
+    <line x1="3" y1="21" x2="10" y2="14" />
   </svg>
 );
 
@@ -788,7 +804,7 @@ const preloadStandby = (id, data) => {
   audioEngine.preload(id, data.url);
 };
 
-export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroundImageUrl, playRequest, onPlayerApi, onLikedChange }) {
+export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroundImageUrl, playRequest, onPlayerApi, onLikedChange, onPlaylistsChange, mode, onModeChange }) {
   // Read once, synchronously, before any state is seeded below — several
   // pieces of initial state (active playlist, track index, search pick,
   // volume) fall back to whatever was saved here so playback can resume.
@@ -865,10 +881,32 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
   // Full-screen time-synced lyrics — opens ONLY when the listener picks
   // "Synced view" inside the lyrics panel; browser full-screen never shows it.
   const [showSyncLyrics, setShowSyncLyrics] = useState(false);
+  const [trackMeta, setTrackMeta] = useState({}); // id -> real artists / album fetched from YouTube Music when a track plays
+  const [showFullView, setShowFullView] = useState(false); // full-page "now playing" view (components/FullPlayer.jsx)
   const [lyricsLoading, setLyricsLoading] = useState(false);
   // { available, synced: [{time, text}] | null, plain: string | null }
   const [lyricsData, setLyricsData] = useState(null);
   const lyricsRequestIdRef = useRef(0);
+  // Roman / Devanagari / Urdu view of the lyrics ("orig" = exactly as fetched). Remembered on this device.
+  const [scriptMode, setScriptModeState] = useState(() => {
+    try { const v = window.localStorage.getItem(SCRIPT_STORAGE_KEY); return SCRIPT_MODES.some((m) => m.id === v) ? v : "orig"; } catch { return "orig"; }
+  });
+  // If this song's lyrics cannot be shown in the saved script (e.g. Punjabi / Tamil lyrics), they stay as
+  // fetched and the toggle shows "Original" for this song; the saved choice still applies to other songs.
+  const scriptAvail = useMemo(() => (scriptMode === "orig" || !lyricsData ? "ok" : scriptAvailability(lyricsData, scriptMode)), [lyricsData, scriptMode]);
+  const activeScript = scriptAvail === "unavailable" ? "orig" : scriptMode;
+  const setScriptMode = (m) => {
+    if (m !== "orig" && m !== activeScript) {
+      const a = scriptAvailability(lyricsData, m);
+      const label = m === "roman" ? "Roman" : m === "dev" ? "Devanagari (\u0926\u0947\u0935\u0928\u093e\u0917\u0930\u0940)" : "Urdu (\u0627\u0631\u062f\u0648)";
+      if (a === "unavailable") { pushToast(`Is song ke lyrics ${label} script me available nahi hain.`, "warning", 3500); return; }
+      if (a === "same") pushToast(`Ye lyrics pehle se hi ${label} me hain.`, "success", 2800);
+    }
+    setScriptModeState(m);
+    try { window.localStorage.setItem(SCRIPT_STORAGE_KEY, m); } catch { /* ignore */ }
+  };
+  const shownLyrics = useMemo(() => convertLyrics(lyricsData, activeScript), [lyricsData, activeScript]);
+  const hasAnyLyrics = !!(lyricsData?.available && !lyricsData.instrumental && (lyricsData.plain || lyricsData.synced?.length));
 
   const [playbackError, setPlaybackError] = useState(null);
 
@@ -1318,8 +1356,68 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [playlistIndexVersion]);
 
-  const currentTrack =
+  const baseTrack =
     activeSource === "search" ? searchTrack : playlist?.tracks?.[currentIndex];
+  // Playlist tracks only know their uploader ("T-Series"): once the song plays, the real artists /
+  // album are fetched from YouTube Music (see the effect below) and shown everywhere. Same id, so
+  // nothing about playback changes.
+  const currentTrack = useMemo(() => {
+    const m = baseTrack && trackMeta[baseTrack.id];
+    if (!m) return baseTrack;
+    return {
+      ...baseTrack,
+      uploader: baseTrack.channel,
+      channel: m.channel || baseTrack.channel,
+      artists: m.artists,
+      album: m.album || baseTrack.album || null,
+      thumbnailUrl: baseTrack.thumbnailUrl || m.thumbnailUrl || null,
+      albumCover: m.thumbnailUrl || null, // the song's real cover (album art) from YouTube Music
+    };
+  }, [baseTrack, trackMeta]);
+
+  useEffect(() => {
+    const t = baseTrack;
+    if (!t?.id || !t.title || t.isMusic || t.artists?.length) return undefined;
+    const cached = TRACK_INFO_CACHE.get(t.id);
+    if (cached) { setTrackMeta((prev) => (prev[t.id] ? prev : { ...prev, [t.id]: cached })); return undefined; }
+    if (cached === null) return undefined; // looked up before: nothing found
+    let cancelled = false;
+    whenPlaybackIdle(30000) // display-only lookup: waits until the clicked song is really playing
+      .then(() => new Promise((r) => setTimeout(r, showFullView ? 300 : 25000))) // singer/cover lookup: only when the full view needs it, else well after the song is playing
+      .then(() => {
+        if (cancelled || document.hidden) return null;
+        const p = new URLSearchParams({ id: t.id, title: t.title });
+        if (t.channel) p.set("channel", t.channel);
+        if (t.duration) p.set("duration", String(Math.round(t.duration)));
+        return fetch(`${API_BASE}/api/track-info?${p.toString()}`).then((r) => (r.ok ? r.json() : null));
+      })
+      .then((d) => {
+        if (d === undefined || (d === null && cancelled)) return;
+        const info = d?.found ? d : null;
+        if (d) TRACK_INFO_CACHE.set(t.id, info);
+        if (!cancelled && info) setTrackMeta((prev) => ({ ...prev, [t.id]: info }));
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [baseTrack?.id, showFullView]);
+
+  // Keep the stream function warm (production only: a quiet serverless function otherwise costs the first
+  // click a multi-second cold start). Deliberately gentle so it can never slow a song down: no ping at page
+  // load, first one after 45 s, then every 4 min; only while the tab is visible and no song is resolving.
+  useEffect(() => {
+    if (!import.meta.env?.PROD) return undefined;
+    const ping = async () => {
+      if (document.hidden) return;
+      await whenPlaybackIdle(1);
+      if (document.hidden) return;
+      fetch(`${API_BASE}/api/stream`, { method: "OPTIONS" }).catch(() => {});
+    };
+    const first = setTimeout(ping, 45000);
+    const id = setInterval(ping, 4 * 60 * 1000);
+    return () => { clearTimeout(first); clearInterval(id); };
+  }, []);
+
 
   // Resolves a track ID to { url, type: "direct"|"hls" }, via an in-memory
   // client-side cache first (instant, no network at all) and falling back
@@ -2718,6 +2816,7 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
   };
 
   const playSearchResult = (track) => {
+    if (searchQuery.trim()) saveSearchQuery(searchQuery);
     setSearchTrack(track);
     setActiveSource("search");
     setIsPlaying(true);
@@ -3263,8 +3362,18 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
   // Lets the host shell (App.jsx) drive like / add-to-playlist from the
   // "Recommended" cards with the very same logic the search cards use.
   useEffect(() => {
-    onPlayerApi?.({ toggleLike: toggleLikeTrack, addToPlaylist: openAddToPlaylistPicker });
+    onPlayerApi?.({
+      toggleLike: toggleLikeTrack,
+      addToPlaylist: openAddToPlaylistPicker,
+      openArtist: openArtistPage,                 // Recommended page: artist strip -> artist page
+      selectPlaylist: (id) => setActivePlaylistId(id), // Recommended page: playlist cards (same as a sidebar tab click)
+    });
   });
+  // Tell the host which playlists exist (Recommended page shows them between the song shelves).
+  useEffect(() => {
+    onPlaylistsChange?.({ radio: playlists, custom: customPlaylists, activeId: activePlaylistId });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [playlists, customPlaylists, activePlaylistId]);
   useEffect(() => {
     onLikedChange?.(likedTracks.map((t) => t.id));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -3522,6 +3631,26 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
         </div>
 
         <div className="drawer-body">
+          {onModeChange && (
+            <div className="drawer-section drawer-mode">
+              <p className="drawer-section-label">Mode</p>
+              <div className="drawer-mode-switch" role="radiogroup" aria-label="Mode" data-mode={mode}>
+                <span className="drawer-mode-thumb" aria-hidden="true" />
+                {[["default", "Default", "radio"], ["recommended", "Recommended", "sparkles"]].map(([id, label, icon]) => (
+                  <button
+                    key={id}
+                    type="button"
+                    role="radio"
+                    aria-checked={mode === id}
+                    className={`drawer-mode-btn ${mode === id ? "is-active" : ""}`}
+                    onClick={() => { onModeChange(id); onCloseMenu?.(); }}
+                  >
+                    <Icon name={icon} /> {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
           {playlists.length > 0 && (
             <div className="drawer-section">
               <p className="drawer-section-label">Radio playlists</p>
@@ -3861,6 +3990,7 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
                 className="sp-input"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") saveSearchQuery(searchQuery); }}
                 placeholder={listening ? "Listening… say a song or artist" : "Search any song…"}
                 aria-label="Search any song"
                 autoComplete="off"
@@ -3902,6 +4032,9 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
                 <p className="sp-empty-sub">Type a song, an artist or a few words from the lyrics.</p>
               </div>
             )}
+
+            {/* History (this device only) + suggestions */}
+            <SearchHistory query={searchQuery} onPick={(q) => { setSearchQuery(q); searchPageInputRef.current?.focus(); }} />
 
             {searchQuery.trim() && shownArtist && (
               <>
@@ -4044,6 +4177,15 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
                 onClick={() => openAddToPlaylistPicker(currentTrack)}
               >
                 <SaveIcon />
+              </button>
+              <button
+                type="button"
+                className="add-to-playlist-btn add-to-playlist-btn--header fullview-toggle-btn"
+                aria-label="Open full player view"
+                title="Full view"
+                onClick={() => setShowFullView(true)}
+              >
+                <ExpandIcon />
               </button>
               <button
                 type="button"
@@ -4347,6 +4489,44 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
         </div>
       )}
 
+      {showFullView && currentTrack && (
+        <FullPlayer
+          track={currentTrack}
+          coverUrl={currentTrack.albumCover || (currentTrack.isMusic ? currentTrack.thumbnailUrl : null)}
+          backgroundImageUrl={backgroundImageUrl}
+          eyebrow={activeSource === "search" ? "Playing from search" : "Now Playing"}
+          subtitle={activeSource === "search" ? "Custom pick" : playlist?.playlistTitle}
+          isPlaying={isPlaying}
+          isTrackLoading={isTrackLoading}
+          currentTime={currentTime}
+          duration={duration}
+          volume={volume}
+          shuffle={shuffle}
+          autoplay={autoplay}
+          repeatOne={repeatOne}
+          liked={isTrackLiked(currentTrack.id)}
+          shuffleDisabled={activeSource === "search"}
+          syncedLines={shownLyrics?.synced || []}
+          lyricsLoading={lyricsLoading}
+          scriptMode={activeScript}
+          onScriptMode={setScriptMode}
+          scriptEnabled={hasAnyLyrics}
+          onClose={() => setShowFullView(false)}
+          onTogglePlay={togglePlayPause}
+          onPrev={handlePrev}
+          onNext={handleNext}
+          onSeek={seekTo}
+          onVolume={handleVolumeChange}
+          onToggleShuffle={toggleShuffle}
+          onToggleAutoplay={toggleAutoplay}
+          onToggleRepeat={toggleRepeatOne}
+          onToggleLike={() => toggleLikeTrack(currentTrack)}
+          onOpenSynced={() => setShowSyncLyrics(true)}
+          onOpenLyrics={() => setShowLyrics(true)}
+          icons={{ PlayIcon, PauseIcon, PrevIcon, NextIcon, ShuffleIcon, AutoplayIcon, RepeatOneIcon, HeartIcon, MicIcon, SyncIcon, LoadingSpinnerIcon, VolumeIcon }}
+        />
+      )}
+
       {showLyrics && currentTrack && (
         <div className="lyrics-modal-overlay" onMouseDown={() => setShowLyrics(false)}>
           <div className="lyrics-modal" onMouseDown={(e) => e.stopPropagation()}>
@@ -4357,6 +4537,7 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
                 </span>
                 <h3 className="lyrics-modal-title line-clamp-2">{currentTrack.title}</h3>
               </div>
+              {hasAnyLyrics && <ScriptToggle mode={activeScript} onChange={setScriptMode} />}
               <button
                 type="button"
                 className="lyrics-sync-btn"
@@ -4404,11 +4585,11 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
                       track, no timestamp tracking or active-line highlighting.
                       Prefer lrclib's plain-text lyrics; if only synced (timed)
                       lyrics came back, strip the timing and show the text. */}
-                  {(lyricsData.plain
-                    ? lyricsData.plain.split(/\r?\n/)
-                    : (lyricsData.synced || []).map((l) => l.text).filter(Boolean)
+                  {(shownLyrics.plain
+                    ? shownLyrics.plain.split(/\r?\n/)
+                    : (shownLyrics.synced || []).map((l) => l.text).filter(Boolean)
                   ).map((line, idx) => (
-                    <p key={idx} className="lyrics-line">
+                    <p key={idx} className="lyrics-line" dir="auto">
                       {line || "\u00A0"}
                     </p>
                   ))}
@@ -4424,7 +4605,9 @@ export default function Player({ onTrackChange, menuOpen, onCloseMenu, backgroun
       {showSyncLyrics && currentTrack && (
         <SyncedLyrics
           track={currentTrack}
-          lines={lyricsData?.synced || []}
+          lines={shownLyrics?.synced || []}
+          scriptMode={activeScript}
+          onScriptMode={setScriptMode}
           loading={lyricsLoading}
           currentTime={currentTime}
           duration={duration}

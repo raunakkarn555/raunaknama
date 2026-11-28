@@ -49,6 +49,9 @@
 [functions."music-search"]
   timeout = 26
 
+[functions."track-info"]
+  timeout = 26
+
 [functions."playlist"]
   timeout = 26
 

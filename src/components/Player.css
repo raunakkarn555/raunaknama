@@ -83,7 +83,7 @@
   position: sticky;
   top: 0;
   background: inherit;
-  z-index: 1;
+  z-index: 5; /* always above the content (e.g. the Mode switch) scrolling underneath */
 }
 
 .drawer-title {
@@ -1204,26 +1204,21 @@ input[type="range"]:focus-visible {
 
 /* Custom scrollbar for the queue list / drawer / dropdowns */
 .custom-scrollbar::-webkit-scrollbar {
-  width: 5px;
+  width: 7px;
 }
 
 .custom-scrollbar::-webkit-scrollbar-track {
-  background: rgba(24, 24, 27, 0.4);
+  background: rgba(244, 232, 216, 0.04);
   border-radius: 8px;
 }
 
-.custom-scrollbar::-webkit-scrollbar-thumb {
-  background: rgba(226, 171, 63, 0.35);
-  border-radius: 8px;
-}
+/* thumb colours come from the global theme scrollbar (index.css): gold -> red gradient */
 
-.custom-scrollbar::-webkit-scrollbar-thumb:hover {
-  background: rgba(226, 171, 63, 0.7);
-}
-
-.custom-scrollbar {
-  scrollbar-width: thin;
-  scrollbar-color: rgba(226, 171, 63, 0.35) rgba(24, 24, 27, 0.4);
+@supports (-moz-appearance: none) {
+  .custom-scrollbar {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(226, 171, 63, 0.65) rgba(244, 232, 216, 0.04);
+  }
 }
 
 /* ==========================================================================
@@ -2256,3 +2251,45 @@ input[type="range"]:focus-visible {
   .voice-btn.is-listening::before, .voice-btn.is-listening::after { animation: none; }
   .like-btn.is-liked svg, .sp-act.is-liked svg, .rc-act.is-liked svg { animation: none; }
 }
+
+/* ---------- Sidebar: Mode switch ---------- */
+.drawer-mode-switch {
+  position: relative; display: grid; grid-template-columns: 1fr 1fr; padding: 4px; border-radius: 14px;
+  background: rgba(21, 10, 13, 0.6); border: 1px solid var(--glass-border);
+}
+.drawer-mode-thumb {
+  position: absolute; top: 4px; bottom: 4px; left: 4px; width: calc(50% - 4px); border-radius: 10px;
+  background: linear-gradient(160deg, var(--stripe-gold), var(--stripe-red)); box-shadow: 0 8px 18px -8px rgba(184, 51, 58, 0.8);
+  transition: transform 0.3s cubic-bezier(0.32, 0.72, 0, 1);
+}
+.drawer-mode-switch[data-mode="recommended"] .drawer-mode-thumb { transform: translateX(100%); }
+.drawer-mode-btn {
+  position: relative; z-index: 1; display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 11px 6px;
+  border: 0; background: none; border-radius: 10px; cursor: pointer; font: 700 12.5px/1 var(--font-body); color: rgba(244, 232, 216, 0.8); transition: color 0.2s ease;
+}
+.drawer-mode-btn .ui-icon { width: 14px; height: 14px; }
+.drawer-mode-btn.is-active { color: var(--bg); }
+.drawer-mode-btn:focus-visible { outline: 2px solid var(--cream); outline-offset: 2px; }
+
+/* Sidebar "Mode" section: its inner layers must never paint above the sticky drawer header */
+.drawer-mode { position: relative; z-index: 0; }
+.drawer-mode-switch { isolation: isolate; }
+
+/* Lyrics card: roomy, theme scrollbar */
+.lyrics-modal-body { scrollbar-gutter: stable; }
+.lyrics-modal-body::-webkit-scrollbar-track { margin: 8px 0; }
+
+/* ---------- lyrics sheet header (all screens): title + close on row 1, script toggle + Synced view below ---------- */
+.lyrics-modal-head { flex-wrap: wrap; align-items: center; gap: 10px 8px; padding: 14px 16px 12px; }
+.lyrics-modal-head .lyrics-modal-head-text { order: 1; flex: 1 1 calc(100% - 46px); min-width: 0; }
+.lyrics-modal-head .lyrics-modal-close { order: 2; }
+.lyrics-modal-head .script-toggle { order: 3; flex: 1 1 auto; min-width: 0; justify-content: space-between; box-sizing: border-box; }
+.lyrics-modal-head .script-toggle-btn { flex: 1 1 auto; padding: 6px 8px; font-size: 12px; text-align: center; }
+.lyrics-modal-head .lyrics-sync-btn { order: 4; flex: 1 1 auto; justify-content: center; height: 34px; padding: 0 14px; font-size: 0.76rem; }
+.lyrics-modal-head .lyrics-sync-btn svg { width: 15px; height: 15px; flex: 0 0 auto; }
+@media (max-width: 380px) {
+  .lyrics-modal-head .script-toggle-btn { padding: 6px 5px; font-size: 11.5px; }
+}
+
+/* toasts must show above the lyrics sheet (400), synced lyrics (260) and the full player (250) */
+.toast-stack { z-index: 500; }

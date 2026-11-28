@@ -152,3 +152,17 @@
   .sl-root { animation: none; }
   .sl-line, .sl-cover { transition: none; }
 }
+
+/* ---------- mobile fit: script toggle next to the close button, never overlapping the cover / title ---------- */
+@media (max-width: 860px) {
+  .sl-root .sl-script { top: calc(12px + env(safe-area-inset-top, 0px)); left: 12px; right: 58px; display: flex; width: auto; box-sizing: border-box; }
+  .sl-root .sl-script .script-toggle-btn { flex: 1 1 auto; padding: 5px 6px; font-size: 12px; text-align: center; }
+}
+@media (max-width: 380px) {
+  .sl-root .sl-script .script-toggle-btn { padding: 5px 4px; font-size: 11.5px; }
+}
+@media (max-height: 500px) {
+  .sl-root .sl-script { top: 8px; left: 10px; right: auto; width: min(320px, 38%); }
+  .sl-layout { padding-top: calc(52px + env(safe-area-inset-top, 0px)); }
+  .sl-close { top: calc(8px + env(safe-area-inset-top, 0px)); right: 10px; width: 36px; height: 36px; }
+}

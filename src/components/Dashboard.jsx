@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "./Dashboard.css";
 import Icon from "./Icon";
+import { whenPlaybackIdle } from "../streamClient";
 
 const STREAM_ENDPOINT = "/api/stream";
 const streamUrl = (token) => `${STREAM_ENDPOINT}?token=${encodeURIComponent(token)}`;
@@ -191,6 +192,13 @@ const MOODS = [
   { id: "sad", label: "Sad", icon: "heartCrack" },
   { id: "retro90", label: "Retro 90s", icon: "tape" },
   { id: "workout", label: "Workout", icon: "dumbbell" },
+  // Era timeline (purane zamane ki sair): one tap and the shelves fill with songs of that decade.
+  { id: "era50", label: "50s", icon: "tape" },
+  { id: "era60", label: "60s", icon: "tape" },
+  { id: "era70", label: "70s", icon: "tape" },
+  { id: "era80", label: "80s", icon: "tape" },
+  { id: "era90", label: "90s", icon: "tape" },
+  { id: "era00", label: "2000s", icon: "tape" },
 ];
 const MOOD_SEEDS = {
   romantic: [
@@ -304,6 +312,121 @@ const MOOD_SEEDS = {
     { title: "Motivational Hindi", q: "hindi motivational songs" },
     { title: "Deshbhakti Josh", q: "deshbhakti josh songs" },
   ],
+  // ----- era timeline seeds -----
+  era50: [
+    { title: "50s Bollywood Hits", q: "1950s bollywood hit songs" },
+    { title: "50s Romantic", q: "1950s bollywood romantic songs" },
+    { title: "50s Evergreen", q: "1950s hindi evergreen songs" },
+    { title: "50s Dance", q: "1950s bollywood dance songs" },
+    { title: "50s Sad Songs", q: "1950s hindi sad songs" },
+    { title: "50s Duets", q: "1950s bollywood duets" },
+    { title: "50s Film Classics", q: "1950s hindi film songs" },
+    { title: "Lata Mangeshkar 50s", q: "Lata Mangeshkar 1950s hindi songs" },
+    { title: "Mohammed Rafi 50s", q: "Mohammed Rafi 1950s hindi songs" },
+    { title: "Talat Mahmood 50s", q: "Talat Mahmood 1950s hindi songs" },
+    { title: "Geeta Dutt 50s", q: "Geeta Dutt 1950s hindi songs" },
+    { title: "Mukesh 50s", q: "Mukesh 1950s hindi songs" },
+    { title: "Hemant Kumar 50s", q: "Hemant Kumar 1950s hindi songs" },
+    { title: "Manna Dey 50s", q: "Manna Dey 1950s hindi songs" },
+    { title: "Shamshad Begum 50s", q: "Shamshad Begum 1950s hindi songs" },
+    { title: "Asha Bhosle 50s", q: "Asha Bhosle 1950s hindi songs" },
+    { title: "Kishore Kumar 50s", q: "Kishore Kumar 1950s hindi songs" },
+  ],
+  era60: [
+    { title: "60s Bollywood Hits", q: "1960s bollywood hit songs" },
+    { title: "60s Romantic", q: "1960s bollywood romantic songs" },
+    { title: "60s Evergreen", q: "1960s hindi evergreen songs" },
+    { title: "60s Dance", q: "1960s bollywood dance songs" },
+    { title: "60s Sad Songs", q: "1960s hindi sad songs" },
+    { title: "60s Duets", q: "1960s bollywood duets" },
+    { title: "60s Film Classics", q: "1960s hindi film songs" },
+    { title: "Mohammed Rafi 60s", q: "Mohammed Rafi 1960s hindi songs" },
+    { title: "Lata Mangeshkar 60s", q: "Lata Mangeshkar 1960s hindi songs" },
+    { title: "Kishore Kumar 60s", q: "Kishore Kumar 1960s hindi songs" },
+    { title: "Asha Bhosle 60s", q: "Asha Bhosle 1960s hindi songs" },
+    { title: "Mukesh 60s", q: "Mukesh 1960s hindi songs" },
+    { title: "Mahendra Kapoor 60s", q: "Mahendra Kapoor 1960s hindi songs" },
+    { title: "Manna Dey 60s", q: "Manna Dey 1960s hindi songs" },
+    { title: "Talat Mahmood 60s", q: "Talat Mahmood 1960s hindi songs" },
+    { title: "Hemant Kumar 60s", q: "Hemant Kumar 1960s hindi songs" },
+    { title: "Suman Kalyanpur 60s", q: "Suman Kalyanpur 1960s hindi songs" },
+  ],
+  era70: [
+    { title: "70s Bollywood Hits", q: "1970s bollywood hit songs" },
+    { title: "70s Romantic", q: "1970s bollywood romantic songs" },
+    { title: "70s Evergreen", q: "1970s hindi evergreen songs" },
+    { title: "70s Dance", q: "1970s bollywood dance songs" },
+    { title: "70s Sad Songs", q: "1970s hindi sad songs" },
+    { title: "70s Duets", q: "1970s bollywood duets" },
+    { title: "70s Film Classics", q: "1970s hindi film songs" },
+    { title: "Kishore Kumar 70s", q: "Kishore Kumar 1970s hindi songs" },
+    { title: "Lata Mangeshkar 70s", q: "Lata Mangeshkar 1970s hindi songs" },
+    { title: "R D Burman 70s", q: "R D Burman 1970s hindi songs" },
+    { title: "Asha Bhosle 70s", q: "Asha Bhosle 1970s hindi songs" },
+    { title: "Mohammed Rafi 70s", q: "Mohammed Rafi 1970s hindi songs" },
+    { title: "Mukesh 70s", q: "Mukesh 1970s hindi songs" },
+    { title: "Kalyanji Anandji 70s", q: "Kalyanji Anandji 1970s hindi songs" },
+    { title: "Laxmikant Pyarelal 70s", q: "Laxmikant Pyarelal 1970s hindi songs" },
+    { title: "Manna Dey 70s", q: "Manna Dey 1970s hindi songs" },
+    { title: "Amit Kumar 70s", q: "Amit Kumar 1970s hindi songs" },
+  ],
+  era80: [
+    { title: "80s Bollywood Hits", q: "1980s bollywood hit songs" },
+    { title: "80s Romantic", q: "1980s bollywood romantic songs" },
+    { title: "80s Evergreen", q: "1980s hindi evergreen songs" },
+    { title: "80s Dance", q: "1980s bollywood dance songs" },
+    { title: "80s Sad Songs", q: "1980s hindi sad songs" },
+    { title: "80s Duets", q: "1980s bollywood duets" },
+    { title: "80s Film Classics", q: "1980s hindi film songs" },
+    { title: "Kishore Kumar 80s", q: "Kishore Kumar 1980s hindi songs" },
+    { title: "Bappi Lahiri 80s", q: "Bappi Lahiri 1980s hindi songs" },
+    { title: "Lata Mangeshkar 80s", q: "Lata Mangeshkar 1980s hindi songs" },
+    { title: "Asha Bhosle 80s", q: "Asha Bhosle 1980s hindi songs" },
+    { title: "Amit Kumar 80s", q: "Amit Kumar 1980s hindi songs" },
+    { title: "Kavita Krishnamurthy 80s", q: "Kavita Krishnamurthy 1980s hindi songs" },
+    { title: "Alisha Chinai 80s", q: "Alisha Chinai 1980s hindi songs" },
+    { title: "Anuradha Paudwal 80s", q: "Anuradha Paudwal 1980s hindi songs" },
+    { title: "Shailendra Singh 80s", q: "Shailendra Singh 1980s hindi songs" },
+    { title: "Laxmikant Pyarelal 80s", q: "Laxmikant Pyarelal 1980s hindi songs" },
+  ],
+  era90: [
+    { title: "90s Bollywood Hits", q: "1990s bollywood hit songs" },
+    { title: "90s Romantic", q: "1990s bollywood romantic songs" },
+    { title: "90s Evergreen", q: "1990s hindi evergreen songs" },
+    { title: "90s Dance", q: "1990s bollywood dance songs" },
+    { title: "90s Sad Songs", q: "1990s hindi sad songs" },
+    { title: "90s Duets", q: "1990s bollywood duets" },
+    { title: "90s Film Classics", q: "1990s hindi film songs" },
+    { title: "Kumar Sanu 90s", q: "Kumar Sanu 1990s hindi songs" },
+    { title: "Udit Narayan 90s", q: "Udit Narayan 1990s hindi songs" },
+    { title: "Alka Yagnik 90s", q: "Alka Yagnik 1990s hindi songs" },
+    { title: "Abhijeet 90s", q: "Abhijeet 1990s hindi songs" },
+    { title: "Sadhana Sargam 90s", q: "Sadhana Sargam 1990s hindi songs" },
+    { title: "Nadeem Shravan 90s", q: "Nadeem Shravan 1990s hindi songs" },
+    { title: "Jatin Lalit 90s", q: "Jatin Lalit 1990s hindi songs" },
+    { title: "Anu Malik 90s", q: "Anu Malik 1990s hindi songs" },
+    { title: "Kavita Krishnamurthy 90s", q: "Kavita Krishnamurthy 1990s hindi songs" },
+    { title: "Sonu Nigam 90s", q: "Sonu Nigam 1990s hindi songs" },
+  ],
+  era00: [
+    { title: "2000s Bollywood Hits", q: "2000s bollywood hit songs" },
+    { title: "2000s Romantic", q: "2000s bollywood romantic songs" },
+    { title: "2000s Evergreen", q: "2000s hindi evergreen songs" },
+    { title: "2000s Dance", q: "2000s bollywood dance songs" },
+    { title: "2000s Sad Songs", q: "2000s hindi sad songs" },
+    { title: "2000s Duets", q: "2000s bollywood duets" },
+    { title: "2000s Film Classics", q: "2000s hindi film songs" },
+    { title: "Sonu Nigam 2000s", q: "Sonu Nigam 2000s hindi songs" },
+    { title: "Shreya Ghoshal 2000s", q: "Shreya Ghoshal 2000s hindi songs" },
+    { title: "Sunidhi Chauhan 2000s", q: "Sunidhi Chauhan 2000s hindi songs" },
+    { title: "Shaan 2000s", q: "Shaan 2000s hindi songs" },
+    { title: "KK 2000s", q: "KK 2000s hindi songs" },
+    { title: "Udit Narayan 2000s", q: "Udit Narayan 2000s hindi songs" },
+    { title: "Himesh Reshammiya 2000s", q: "Himesh Reshammiya 2000s hindi songs" },
+    { title: "Pritam 2000s", q: "Pritam 2000s hindi songs" },
+    { title: "Vishal Shekhar 2000s", q: "Vishal Shekhar 2000s hindi songs" },
+    { title: "A R Rahman 2000s", q: "A R Rahman 2000s hindi songs" },
+  ],
 };
 const QUERY_SUFFIXES = ["", " songs", " best", " hits", " evergreen", " top"];
 const SECTION_SIZE = 12;   // cards per shelf
@@ -316,6 +439,7 @@ const REQUEST_TIMEOUT_MS = 6000;
 let preferredInstance = 0;
 
 async function pipedGet(path, params, signal) {
+  await whenPlaybackIdle(6000); // never compete with a song the listener just clicked
   const qs = new URLSearchParams(params).toString();
   let lastErr = new Error("No Piped instance reachable");
   for (let n = 0; n < INSTANCES.length; n++) {
@@ -638,6 +762,7 @@ function RecoCard({ item, isCurrent, playing, liked = false, onSelect, onWarm, o
     <li
       className={`rc ${isCurrent ? "is-current" : ""}`}
       onPointerEnter={() => onWarm?.(item)}
+      onPointerDown={() => onWarm?.(item)}
       onPointerLeave={onCancelWarm}
     >
       <button
@@ -686,11 +811,200 @@ function RecoCard({ item, isCurrent, playing, liked = false, onSelect, onWarm, o
   );
 }
 
+
+/* ------------------- Artists strip + playlist shelves (Recommended) ------------------- */
+const API_BASE = import.meta.env?.VITE_API_BASE_URL || "";
+const ARTIST_COUNT = 12;
+// A big pool; 12 are drawn at random each time the page opens (never the same 12 twice in a row).
+const ARTIST_POOL = [
+  "Arijit Singh", "Kishore Kumar", "Mohammed Rafi", "Lata Mangeshkar", "Atif Aslam", "Shreya Ghoshal",
+  "Sonu Nigam", "Udit Narayan", "Kumar Sanu", "Alka Yagnik", "Jubin Nautiyal", "A. R. Rahman", "Pritam",
+  "Nusrat Fateh Ali Khan", "Rahat Fateh Ali Khan", "Lucky Ali", "KK", "Mohit Chauhan", "Neha Kakkar",
+  "Badshah", "Diljit Dosanjh", "Guru Randhawa", "Darshan Raval", "B Praak", "Armaan Malik", "Papon",
+  "Shaan", "Sunidhi Chauhan", "Asha Bhosle", "Mukesh", "Hemant Kumar", "Manna Dey", "Talat Mahmood",
+  "Jagjit Singh", "Ghulam Ali", "Mehdi Hassan", "Abhijeet Bhattacharya", "Sadhana Sargam", "Kavita Krishnamurthy",
+  "Anuradha Paudwal", "Vishal Mishra", "Ankit Tiwari", "Palak Muchhal", "Sukhwinder Singh", "Mika Singh",
+  "Yo Yo Honey Singh", "AP Dhillon", "Karan Aujla", "Sidhu Moose Wala", "Divine", "Raftaar", "Emiway Bantai",
+  "Amit Trivedi", "Vishal-Shekhar", "Shankar Mahadevan", "Javed Ali", "Kailash Kher", "Harshdeep Kaur",
+  "Monali Thakur", "Tulsi Kumar", "Stebin Ben", "Sachet Tandon", "Parampara Tandon", "Ritviz", "Prateek Kuhad",
+  "Anuv Jain", "Arman Malik", "Rekha Bhardwaj", "Kunal Ganjawala", "Hariharan", "S. P. Balasubrahmanyam",
+];
+let lastArtistPick = [];
+const pickArtists = () => {
+  const fresh = ARTIST_POOL.filter((n) => !lastArtistPick.includes(n));
+  const picked = shuffle(fresh).slice(0, ARTIST_COUNT);
+  lastArtistPick = picked;
+  return picked;
+};
+const artistInitials = (name) => String(name || "?").split(/\s+/).slice(0, 2).map((w) => w[0]?.toUpperCase() || "").join("");
+const artistCache = new Map(); // name -> artist object | null  (server also caches for 24h)
+
+function ArtistBubble({ name, artist, onOpen, index }) {
+  const [failed, setFailed] = useState(false);
+  useEffect(() => setFailed(false), [artist?.image]);
+  const shown = artist?.name || name;
+  return (
+    <li className="as-item" style={{ "--i": index }}>
+      <button type="button" className="as-btn" onClick={() => onOpen(artist || { name })} aria-label={`Open artist page for ${shown}`}>
+        <span className="as-ring">
+          <span className="as-avatar">
+            {artist?.image && !failed
+              ? <img src={artist.image} alt="" loading="lazy" decoding="async" referrerPolicy="no-referrer" onError={() => setFailed(true)} />
+              : <span className="as-initials" aria-hidden="true">{artistInitials(shown)}</span>}
+          </span>
+        </span>
+        <span className="as-name" title={shown}>{shown}</span>
+      </button>
+    </li>
+  );
+}
+
+/** One horizontal line of 10-12 artists, a fresh set every visit. */
+function ArtistStrip({ onOpenArtist }) {
+  const [names, setNames] = useState(pickArtists);
+  const [artists, setArtists] = useState(() => Object.fromEntries([...artistCache.entries()].filter(([, v]) => v)));
+
+  useEffect(() => {
+    let alive = true;
+    const todo = names.filter((n) => !artistCache.has(n));
+    let cursor = 0;
+    const worker = async () => {
+      while (alive && cursor < todo.length) {
+        const n = todo[cursor++];
+        try {
+          await whenPlaybackIdle(6000); // artist photos wait until the clicked song is playing
+          const res = await fetch(`${API_BASE}/api/artist?q=${encodeURIComponent(n)}`);
+          const data = res.ok ? await res.json() : null;
+          artistCache.set(n, data?.artist || null);
+          if (alive && data?.artist) setArtists((prev) => ({ ...prev, [n]: data.artist }));
+        } catch { artistCache.set(n, null); }
+      }
+    };
+    Promise.all([worker(), worker(), worker(), worker()]);
+    return () => { alive = false; };
+  }, [names]);
+
+  const rowRef = useRef(null);
+  const nudge = (dir) => rowRef.current?.scrollBy({ left: dir * Math.max(240, rowRef.current.clientWidth * 0.8), behavior: "smooth" });
+
+  return (
+    <section className="reco-band" aria-labelledby="as-title">
+      <div className="reco-band-head">
+        <h3 id="as-title" className="reco-section-title">Artists For You</h3>
+        <div className="as-arrows">
+          <button type="button" className="as-arrow" onClick={() => nudge(-1)} aria-label="Scroll artists left">‹</button>
+          <button type="button" className="as-arrow" onClick={() => nudge(1)} aria-label="Scroll artists right">›</button>
+        </div>
+        <button type="button" className="reco-mini-btn" onClick={() => setNames(pickArtists())} title="Show different artists">
+          <Icon name="dice" /> Shuffle
+        </button>
+      </div>
+      <ul className="as-row" aria-label="Suggested artists" ref={rowRef}>
+        {names.map((n, i) => <ArtistBubble key={n} name={n} artist={artists[n]} index={i} onOpen={onOpenArtist} />)}
+      </ul>
+    </section>
+  );
+}
+
+function PlaylistCard({ pl, active, onSelect }) {
+  return (
+    <li className="pc-item">
+      <button type="button" className={`pc ${active ? "is-active" : ""}`} onClick={() => onSelect(pl.id)} aria-label={`Open playlist ${pl.label}`}>
+        <span className={`pc-cover pc-cover--${pl.thumbs.length >= 4 ? "mosaic" : pl.thumbs.length ? "single" : "plain"}`}>
+          {pl.thumbs.length >= 4
+            ? pl.thumbs.slice(0, 4).map((t, i) => <img key={i} src={t} alt="" loading="lazy" decoding="async" referrerPolicy="no-referrer" />)
+            : pl.thumbs.length
+              ? <img src={pl.thumbs[0]} alt="" loading="lazy" decoding="async" referrerPolicy="no-referrer" />
+              : <span className="pc-glyph"><Icon name={pl.kind === "radio" ? "radio" : "listMusic"} /></span>}
+          <span className="pc-play" aria-hidden="true"><PlayIcon playing={false} /></span>
+          {active && <span className="pc-badge">Now</span>}
+        </span>
+        <span className="pc-title" title={pl.label}>{pl.label}</span>
+        <span className="pc-sub">{pl.kind === "radio" ? "Radio playlist" : `${pl.count} song${pl.count === 1 ? "" : "s"}`}</span>
+      </button>
+    </li>
+  );
+}
+
+/** A horizontal shelf of playlists, dropped in between the song shelves. */
+function PlaylistShelf({ items, activeId, onSelect, title }) {
+  return (
+    <div className="reco-section reco-section--playlists">
+      <h3 className="reco-section-title">{title}</h3>
+      <ul className="pc-row">
+        {items.map((pl) => <PlaylistCard key={pl.id} pl={pl} active={pl.id === activeId} onSelect={onSelect} />)}
+      </ul>
+    </div>
+  );
+}
+
+// Playlist shelves appear only 4 times, with wide gaps (after the 3rd, 8th, 14th and 21st song shelf).
+const PLAYLIST_SHELF_AT = [2, 7, 13, 20];
+const PLAYLIST_SHELF_TITLES = ["Your Playlists", "Jump Into a Playlist", "Playlists You Might Like", "Pick a Playlist"];
+
+const greeting = () => {
+  const h = new Date().getHours();
+  return h < 5 ? "Late night vibes" : h < 12 ? "Good morning" : h < 17 ? "Good afternoon" : h < 21 ? "Good evening" : "Good night";
+};
+
+/** Floating "back to top" button: appears after scrolling down the Recommended page. */
+function BackToTop() {
+  const [show, setShow] = useState(false);
+  useEffect(() => {
+    const on = () => setShow(window.scrollY > 700);
+    on();
+    window.addEventListener("scroll", on, { passive: true });
+    return () => window.removeEventListener("scroll", on);
+  }, []);
+  return (
+    <button
+      type="button"
+      className={`reco-top-btn ${show ? "is-visible" : ""}`}
+      onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
+      aria-label="Back to top"
+      tabIndex={show ? 0 : -1}
+    >
+      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><polyline points="18 15 12 9 6 15" /></svg>
+    </button>
+  );
+}
+
+/** In-page Mode switch (same segmented look as the sidebar / topbar). */
+function ModePills({ mode, onChange }) {
+  return (
+    <div className="mode-pills" role="radiogroup" aria-label="Mode" data-mode={mode}>
+      <span className="mode-pills-thumb" aria-hidden="true" />
+      {[["default", "Default", "radio"], ["recommended", "Recommended", "sparkles"]].map(([id, label, icon]) => (
+        <button key={id} type="button" role="radio" aria-checked={mode === id} className={`mode-pills-btn ${mode === id ? "is-active" : ""}`} onClick={() => onChange(id)}>
+          <Icon name={icon} /> {label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 /** Host-agnostic grid: the host decides how a picked track is played. */
-export function RecommendedGrid({ currentId, playing = false, likedIds, onSelect, onWarm, onCancelWarm, onToggleLike, onAddToPlaylist }) {
+export function RecommendedGrid({ currentId, playing = false, likedIds, onSelect, onWarm, onCancelWarm, onToggleLike, onAddToPlaylist, onOpenArtist, playlists, activePlaylistId, onSelectPlaylist, mode, onModeChange }) {
   const [mood, setMood] = useState("all");
   const { sections, status, loadMore, retry } = usePipedFeed(mood);
   const enabled = status === "idle";
+  // Playlists (your own + radio) offered between the song shelves.
+  const playlistItems = useMemo(() => {
+    const custom = (playlists?.custom || []).map((p) => ({
+      id: p.id, label: p.label, kind: "custom", count: p.tracks?.length || 0,
+      thumbs: (p.tracks || []).slice(0, 4).map((t) => `https://i.ytimg.com/vi/${t.id}/mqdefault.jpg`),
+    }));
+    const radio = (playlists?.radio || []).map((p) => ({ id: p.id, label: p.label, kind: "radio", count: 0, thumbs: [] }));
+    return [...custom, ...radio];
+  }, [playlists]);
+  // Stable per-shelf order (so shelves don't reshuffle on every re-render).
+  const shelfOrder = useRef({ src: null, map: {} });
+  const orderFor = (idx) => {
+    if (shelfOrder.current.src !== playlistItems) shelfOrder.current = { src: playlistItems, map: {} };
+    const m = shelfOrder.current.map;
+    if (!m[idx]) m[idx] = idx === PLAYLIST_SHELF_AT[0] ? playlistItems : shuffle(playlistItems);
+    return m[idx];
+  };
   // Re-subscribes (and re-checks position) each time a shelf lands, so the
   // first shelf loads immediately and a tall viewport keeps filling.
   useNearBottom(loadMore, enabled, sections.length);
@@ -710,8 +1024,12 @@ export function RecommendedGrid({ currentId, playing = false, likedIds, onSelect
 
   return (
     <section className="reco" aria-labelledby="reco-title">
+      {onModeChange && (
+        <div className="reco-modebar"><ModePills mode={mode} onChange={onModeChange} /></div>
+      )}
       <header className="reco-head">
         <span className="reco-chip" aria-hidden="true" />
+        <p className="reco-greet">{greeting()} <span aria-hidden="true">·</span> let the music pick you</p>
         <h2 id="reco-title" className="reco-title">Recommended For You</h2>
         <p className="reco-sub">Fresh picks every visit — keep scrolling.</p>
         <div className="mood-chips" role="tablist" aria-label="Pick a mood">
@@ -730,8 +1048,19 @@ export function RecommendedGrid({ currentId, playing = false, likedIds, onSelect
         </div>
       </header>
 
-      {sections.map((sec) => (
-        <div className="reco-section" key={sec.key}>
+      {onOpenArtist && <ArtistStrip onOpenArtist={onOpenArtist} />}
+
+      {sections.map((sec, idx) => (
+        <React.Fragment key={sec.key}>
+        {playlistItems.length > 0 && onSelectPlaylist && PLAYLIST_SHELF_AT.includes(idx) && (
+          <PlaylistShelf
+            title={PLAYLIST_SHELF_TITLES[PLAYLIST_SHELF_AT.indexOf(idx) % PLAYLIST_SHELF_TITLES.length]}
+            items={orderFor(idx)}
+            activeId={activePlaylistId}
+            onSelect={onSelectPlaylist}
+          />
+        )}
+        <div className="reco-section">
           <h3 className="reco-section-title">{sec.title}</h3>
           <ul className="rc-grid">
             {sec.items.map((it) => (
@@ -750,6 +1079,7 @@ export function RecommendedGrid({ currentId, playing = false, likedIds, onSelect
             ))}
           </ul>
         </div>
+        </React.Fragment>
       ))}
 
       {status === "loading" && (
@@ -767,6 +1097,7 @@ export function RecommendedGrid({ currentId, playing = false, likedIds, onSelect
         </p>
       )}
       {status === "end" && <p className="reco-note">You’ve reached the end — for now.</p>}
+      <BackToTop />
     </section>
   );
 }

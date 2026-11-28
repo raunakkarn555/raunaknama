@@ -1,6 +1,7 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import Icon from "./Icon";
 import "./AppDownloads.css";
+import { canPromptInstall, isIos, isStandalone, promptInstall, subscribeInstall } from "../lib/pwa";
 
 // The native apps live on GitHub Releases (keeps this site light).
 export const RELEASE_URL = "https://github.com/raunakkarn555/raunaknama-music/releases/tag/v4";
@@ -34,6 +35,11 @@ export default function AppDownloads() {
   const platform = useMemo(detectPlatform, []);
   const [tab, setTab] = useState(platform === "android" ? "android" : "windows");
   const [open, setOpen] = useState(false);
+  // Install as app (PWA)
+  const [installable, setInstallable] = useState(canPromptInstall());
+  const [showIosHelp, setShowIosHelp] = useState(false);
+  useEffect(() => subscribeInstall(() => setInstallable(canPromptInstall())), []);
+  const standalone = isStandalone();
 
   return (
     <div className="drawer-section apd-card">
@@ -44,6 +50,21 @@ export default function AppDownloads() {
           <p className="apd-lead">Laptop aur phone dono ke liye.</p>
         </div>
       </div>
+
+      {!standalone && (installable || isIos()) && (
+        <>
+          <button
+            type="button"
+            className="apd-btn apd-btn--primary apd-install"
+            onClick={() => (installable ? promptInstall() : setShowIosHelp((v) => !v))}
+          >
+            <Icon name="download" /> Install as app
+          </button>
+          {showIosHelp && !installable && (
+            <p className="apd-sub">iPhone: Safari me Share dabao, phir &quot;Add to Home Screen&quot;.</p>
+          )}
+        </>
+      )}
 
       <div className="apd-row-btns">
         <a className="apd-btn apd-btn--primary" href={RELEASE_URL} target="_blank" rel="noopener noreferrer">
